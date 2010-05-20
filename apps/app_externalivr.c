@@ -31,9 +31,13 @@
  * \ingroup applications
  */
 
+/*** MODULEINFO
+	<depend>working_fork</depend>
+ ***/
+
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 99975 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 172438 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -41,6 +45,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 99975 $")
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#ifdef HAVE_CAP
+#include <sys/capability.h>
+#endif /* HAVE_CAP */
 
 #include "asterisk/lock.h"
 #include "asterisk/file.h"
@@ -249,6 +256,7 @@ static int app_exec(struct ast_channel *chan, void *data)
 	int child_stdout[2] = { 0,0 };
 	int child_stderr[2] = { 0,0 };
 	int res = -1;
+	int test_available_fd = -1;
 	int gen_active = 0;
 	int pid;
 	char *argv[32];
@@ -316,6 +324,15 @@ static int app_exec(struct ast_channel *chan, void *data)
 	if (!pid) {
 		/* child process */
 		int i;
+#ifdef HAVE_CAP
+		cap_t cap = cap_from_text("cap_net_admin-eip");
+
+		if (cap_set_proc(cap)) {
+			/* Careful with order! Logging cannot happen after we close FDs */
+			ast_log(LOG_WARNING, "Unable to remove capabilities.\n");
+		}
+		cap_free(cap);
+#endif
 
 		signal(SIGPIPE, SIG_DFL);
 		pthread_sigmask(SIG_UNBLOCK, &fullset, NULL);
@@ -366,6 +383,8 @@ static int app_exec(struct ast_channel *chan, void *data)
 			ast_chan_log(LOG_WARNING, chan, "Could not open stream for child errors\n");
 			goto exit;
 		}
+
+		test_available_fd = open("/dev/null", O_RDONLY);
 
 		setvbuf(child_events, NULL, _IONBF, 0);
 		setvbuf(child_commands, NULL, _IONBF, 0);
@@ -500,7 +519,7 @@ static int app_exec(struct ast_channel *chan, void *data)
 			} else if (ready_fd == child_errors_fd) {
 				char input[1024];
 
-				if (exception || feof(child_errors)) {
+				if (exception || (dup2(child_commands_fd, test_available_fd) == -1) || feof(child_errors)) {
 					ast_chan_log(LOG_WARNING, chan, "Child process went away\n");
 					res = -1;
 					break;
@@ -532,6 +551,10 @@ static int app_exec(struct ast_channel *chan, void *data)
 
 	if (child_errors)
 		fclose(child_errors);
+
+	if (test_available_fd > -1) {
+		close(test_available_fd);
+	}
 
 	if (child_stdin[0])
 		close(child_stdin[0]);

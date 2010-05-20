@@ -27,7 +27,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 40722 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 239718 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -57,15 +57,20 @@ static int waitforring_exec(struct ast_channel *chan, void *data)
 {
 	struct ast_module_user *u;
 	struct ast_frame *f;
+	struct ast_silence_generator *silgen = NULL;
 	int res = 0;
 	int ms;
 
-	if (!data || (sscanf(data, "%d", &ms) != 1)) {
+	if (!data || (sscanf(data, "%30d", &ms) != 1)) {
                 ast_log(LOG_WARNING, "WaitForRing requires an argument (minimum seconds)\n");
 		return 0;
 	}
 
 	u = ast_module_user_add(chan);
+
+	if (ast_opt_transmit_silence) {
+		silgen = ast_channel_start_silence_generator(chan);
+	}
 
 	ms *= 1000;
 	while(ms > 0) {
@@ -113,6 +118,10 @@ static int waitforring_exec(struct ast_channel *chan, void *data)
 		}
 	}
 	ast_module_user_remove(u);
+
+	if (silgen) {
+		ast_channel_stop_silence_generator(chan, silgen);
+	}
 
 	return res;
 }

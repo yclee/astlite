@@ -26,7 +26,7 @@
  
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 90155 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 233782 $")
 
 #include <unistd.h>
 #include <netinet/in.h>
@@ -102,7 +102,10 @@ static struct ast_frame *pcm_read(struct ast_filestream *s, int *whennext)
 		return NULL;
 	}
 	s->fr.datalen = res;
-	*whennext = s->fr.samples = res;
+	if (s->fmt->format == AST_FORMAT_G722)
+		*whennext = s->fr.samples = res * 2;
+	else
+		*whennext = s->fr.samples = res;
 	return &s->fr;
 }
 
@@ -281,9 +284,10 @@ static int check_header(FILE *f)
 	if (magic != (uint32_t) AU_MAGIC) {
 		ast_log(LOG_WARNING, "Bad magic: 0x%x\n", magic);
 	}
-/*	hdr_size = ltohl(header[AU_HDR_HDR_SIZE_OFF]);
-	if (hdr_size < AU_HEADER_SIZE)*/
-	hdr_size = AU_HEADER_SIZE;
+	hdr_size = ltohl(header[AU_HDR_HDR_SIZE_OFF]);
+	if (hdr_size < AU_HEADER_SIZE) {
+		hdr_size = AU_HEADER_SIZE;
+	}
 /*	data_size = ltohl(header[AU_HDR_DATA_SIZE_OFF]); */
 	encoding = ltohl(header[AU_HDR_ENCODING_OFF]);
 	if (encoding != AU_ENC_8BIT_ULAW) {
@@ -380,24 +384,31 @@ static int au_rewrite(struct ast_filestream *s, const char *comment)
 static int au_seek(struct ast_filestream *fs, off_t sample_offset, int whence)
 {
 	off_t min, max, cur;
-	long offset = 0, samples;
-	
-	samples = sample_offset;
+	long offset = 0, bytes;
+
+	if (fs->fmt->format == AST_FORMAT_G722)
+		bytes = sample_offset / 2;
+	else
+		bytes = sample_offset;
+
 	min = AU_HEADER_SIZE;
 	cur = ftello(fs->f);
 	fseek(fs->f, 0, SEEK_END);
 	max = ftello(fs->f);
+
 	if (whence == SEEK_SET)
-		offset = samples + min;
+		offset = bytes + min;
 	else if (whence == SEEK_CUR || whence == SEEK_FORCECUR)
-		offset = samples + cur;
+		offset = bytes + cur;
 	else if (whence == SEEK_END)
-		offset = max - samples;
+		offset = max - bytes;
         if (whence != SEEK_FORCECUR) {
 		offset = (offset > max) ? max : offset;
 	}
+
 	/* always protect the header space. */
 	offset = (offset < min) ? min : offset;
+
 	return fseeko(fs->f, offset, SEEK_SET);
 }
 
@@ -493,4 +504,7 @@ static int unload_module(void)
 		|| ast_format_unregister(g722_f.name);
 }	
 
-AST_MODULE_INFO_STANDARD(ASTERISK_GPL_KEY, "Raw/Sun uLaw/ALaw 8KHz (PCM,PCMA,AU), G.722 16Khz");
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_LOAD_FIRST, "Raw/Sun uLaw/ALaw 8KHz (PCM,PCMA,AU), G.722 16Khz",
+	.load = load_module,
+	.unload = unload_module,
+);

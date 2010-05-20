@@ -5,6 +5,10 @@
 </member>
 <member name="codec_a_mu" displayname="A-law and Mulaw direct Coder/Decoder" remove_on_change="codecs/codec_a_mu.o codecs/codec_a_mu.so">
 </member>
+<member name="codec_dahdi" displayname="Generic DAHDI Transcoder Codec Translator" remove_on_change="codecs/codec_dahdi.o codecs/codec_dahdi.so">
+	<depend>dahdi_transcode</depend>
+	<depend>dahdi</depend>
+</member>
 <member name="codec_g726" displayname="ITU G.726-32kbps G726 Transcoder" remove_on_change="codecs/codec_g726.o codecs/codec_g726.so">
 </member>
 <member name="codec_gsm" displayname="GSM Coder/Decoder" remove_on_change="codecs/codec_gsm.o codecs/codec_gsm.so">
@@ -17,12 +21,9 @@
 </member>
 <member name="codec_speex" displayname="Speex Coder/Decoder" remove_on_change="codecs/codec_speex.o codecs/codec_speex.so">
 	<depend>speex</depend>
+	<depend>speex_preprocess</depend>
 	<use>speexdsp</use>
 </member>
 <member name="codec_ulaw" displayname="mu-Law Coder/Decoder" remove_on_change="codecs/codec_ulaw.o codecs/codec_ulaw.so">
-</member>
-<member name="codec_zap" displayname="Generic Zaptel Transcoder Codec Translator" remove_on_change="codecs/codec_zap.o codecs/codec_zap.so">
-	<depend>zaptel_transcode</depend>
-	<depend>zaptel</depend>
 </member>
 </category>

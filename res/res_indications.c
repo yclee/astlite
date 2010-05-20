@@ -26,7 +26,7 @@
  
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 47051 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 182808 $")
 
 #include <unistd.h>
 #include <string.h>
@@ -179,7 +179,7 @@ static int handle_show_indications(int fd, int argc, char *argv[])
 				if (tz->nrringcadence)
 					j--;
 				ast_copy_string(buf+j,"\n",sizeof(buf)-j);
-				ast_cli(fd,buf);
+				ast_cli(fd, "%s", buf);
 				for (ts=tz->tones; ts; ts=ts->next)
 					ast_cli(fd,"%-7.7s %-15.15s %s\n",tz->country,ts->name,ts->data);
 				break;
@@ -399,7 +399,7 @@ static int reload(void)
 	return ind_load_module();
 }
 
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS, "Indications Resource",
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "Indications Resource",
 		.load = load_module,
 		.unload = unload_module,
 		.reload = reload,

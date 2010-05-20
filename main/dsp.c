@@ -42,7 +42,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 91890 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 233014 $")
 
 #include <sys/types.h>
 #include <stdlib.h>
@@ -353,6 +353,7 @@ struct ast_dsp {
 	int tcount;
 	int digitmode;
 	int thinkdigit;
+	int display_inband_dtmf_warning;
 	float genergy;
 	union {
 		dtmf_detect_state_t dtmf;
@@ -1478,7 +1479,10 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 			shortdata[x] = AST_ALAW(odata[x]);
 		break;
 	default:
-		ast_log(LOG_WARNING, "Inband DTMF is not supported on codec %s. Use RFC2833\n", ast_getformatname(af->subclass));
+		/*Display warning only once. Otherwise you would get hundreds of warnings every second */
+		if (dsp->display_inband_dtmf_warning)
+			ast_log(LOG_WARNING, "Inband DTMF is not supported on codec %s. Use RFC2833\n", ast_getformatname(af->subclass));
+		dsp->display_inband_dtmf_warning = 0;
 		return af;
 	}
 	silence = __ast_dsp_silence(dsp, shortdata, len, NULL);
@@ -1486,7 +1490,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 		memset(&dsp->f, 0, sizeof(dsp->f));
 		dsp->f.frametype = AST_FRAME_NULL;
 		ast_frfree(af);
-		return &dsp->f;
+		return ast_frisolate(&dsp->f);
 	}
 	if ((dsp->features & DSP_FEATURE_BUSY_DETECT) && ast_dsp_busydetect(dsp)) {
 		chan->_softhangup |= AST_SOFTHANGUP_DEV;
@@ -1494,8 +1498,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 		dsp->f.frametype = AST_FRAME_CONTROL;
 		dsp->f.subclass = AST_CONTROL_BUSY;
 		ast_frfree(af);
-		ast_log(LOG_DEBUG, "Requesting Hangup because the busy tone was detected on channel %s\n", chan->name);
-		return &dsp->f;
+		return ast_frisolate(&dsp->f);
 	}
 	if ((dsp->features & DSP_FEATURE_DTMF_DETECT)) {
 		digit = __ast_dsp_digitdetect(dsp, shortdata, len, &writeback);
@@ -1516,7 +1519,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 					if (chan)
 						ast_queue_frame(chan, af);
 					ast_frfree(af);
-					return &dsp->f;
+					return ast_frisolate(&dsp->f);
 				}
 			} else {
 				if (digit) {
@@ -1542,7 +1545,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 							ast_queue_frame(chan, af);
 						ast_frfree(af);
 					}
-					return &dsp->f;
+					return ast_frisolate(&dsp->f);
 				} else {
 					memset(&dsp->f, 0, sizeof(dsp->f));
 					if (dsp->thinkdigit != 'x') {
@@ -1559,7 +1562,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 					if (chan)
 						ast_queue_frame(chan, af);
 					ast_frfree(af);
-					return &dsp->f;
+					return ast_frisolate(&dsp->f);
 				}
 			}
 		} else if (!digit) {
@@ -1575,7 +1578,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 					if (chan)
 						ast_queue_frame(chan, af);
 					ast_frfree(af);
-					return &dsp->f;
+					return ast_frisolate(&dsp->f);
 				}
 			} else {
 				if (dsp->td.dtmf.current_digits) {
@@ -1588,7 +1591,7 @@ struct ast_frame *ast_dsp_process(struct ast_channel *chan, struct ast_dsp *dsp,
 					if (chan)
 						ast_queue_frame(chan, af);
 					ast_frfree(af);
-					return &dsp->f;
+					return ast_frisolate(&dsp->f);
 				}
 			}
 		}
@@ -1643,6 +1646,7 @@ struct ast_dsp *ast_dsp_new(void)
 		dsp->threshold = DEFAULT_THRESHOLD;
 		dsp->features = DSP_FEATURE_SILENCE_SUPPRESS;
 		dsp->busycount = DSP_HISTORY;
+		dsp->display_inband_dtmf_warning = 1;
 		/* Initialize DTMF detector */
 		ast_dtmf_detect_init(&dsp->td.dtmf);
 		/* Initialize initial DSP progress detect parameters */

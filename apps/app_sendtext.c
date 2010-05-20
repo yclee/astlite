@@ -29,7 +29,7 @@
  
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 40722 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 187362 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -78,7 +78,9 @@ static int sendtext_exec(struct ast_channel *chan, void *data)
 		
 	u = ast_module_user_add(chan);	
 
-	if (ast_strlen_zero(data)) {
+	/* NOT ast_strlen_zero, because some protocols (e.g. SIP) MUST be able to
+	 * send a zero-length message. */
+	if (!data) {
 		ast_log(LOG_WARNING, "SendText requires an argument (text[|options])\n");
 		ast_module_user_remove(u);
 		return -1;
@@ -95,6 +97,7 @@ static int sendtext_exec(struct ast_channel *chan, void *data)
 	ast_channel_lock(chan);
 	if (!chan->tech->send_text) {
 		ast_channel_unlock(chan);
+		pbx_builtin_setvar_helper(chan, "SENDTEXTSTATUS", status);
 		/* Does not support transport */
 		if (priority_jump || ast_opt_priority_jumping)
 			ast_goto_if_exists(chan, chan->context, chan->exten, chan->priority + 101);

@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 75445 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 216000 $")
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -58,7 +58,14 @@ AST_THREADSTORAGE_CUSTOM(frame_cache, frame_cache_init, frame_cache_cleanup);
 
 /*! \brief This is just so iax_frames, a list head struct for holding a list of
  *  iax_frame structures, is defined. */
-AST_LIST_HEAD_NOLOCK(iax_frames, iax_frame);
+AST_LIST_HEAD_NOLOCK(iax_frame_list, iax_frame);
+
+struct iax_frames {
+	struct iax_frame_list list;
+	size_t size;
+};
+
+#define FRAME_CACHE_MAX_SIZE	20
 #endif
 
 static void internaloutput(const char *str)
@@ -391,6 +398,61 @@ static void dump_ies(unsigned char *iedata, int len)
 		len -= (2 + ielen);
 	}
 	outputf("\n");
+}
+
+void iax_frame_subclass2str(int subclass, char *str, size_t len)
+{
+	static const size_t copylen = 8;
+	const char *iaxs[] = {
+		"(0?)   ",
+		"NEW    ",
+		"PING   ",
+		"PONG   ",
+		"ACK    ",
+		"HANGUP ",
+		"REJECT ",
+		"ACCEPT ",
+		"AUTHREQ",
+		"AUTHREP",
+		"INVAL  ",
+		"LAGRQ  ",
+		"LAGRP  ",
+		"REGREQ ",
+		"REGAUTH",
+		"REGACK ",
+		"REGREJ ",
+		"REGREL ",
+		"VNAK   ",
+		"DPREQ  ",
+		"DPREP  ",
+		"DIAL   ",
+		"TXREQ  ",
+		"TXCNT  ",
+		"TXACC  ",
+		"TXREADY",
+		"TXREL  ",
+		"TXREJ  ",
+		"QUELCH ",
+		"UNQULCH",
+		"POKE   ",
+		"PAGE   ",
+		"MWI    ",
+		"UNSPRTD",
+		"TRANSFR",
+		"PROVISN",
+		"FWDWNLD",
+		"FWDATA ",
+		"TXMEDIA",
+		"RTKEY  ",
+		"CTOKEN ",
+	};
+	if ((copylen > len) || !subclass || (subclass < 0)) {
+		str[0] = '\0';
+	} else if (subclass < ARRAY_LEN(iaxs)) {
+		ast_copy_string(str, iaxs[subclass], len);
+	} else {
+		ast_copy_string(str, "Unknown", len);
+	}
 }
 
 void iax_showframe(struct iax_frame *f, struct ast_iax2_full_hdr *fhi, int rx, struct sockaddr_in *sin, int datalen)
@@ -899,6 +961,12 @@ int iax_parse_ies(struct iax_ies *ies, unsigned char *data, int datalen)
 				ies->rr_ooo = ntohl(get_unaligned_uint32(data + 2));
 			}
 			break;
+		case IAX_IE_CALLTOKEN:
+			if (len) {
+				ies->calltokendata = (unsigned char *) data + 2;
+			}
+			ies->calltoken = 1;
+			break;
 		default:
 			snprintf(tmp, (int)sizeof(tmp), "Ignoring unknown information element '%s' (%d) of length %d\n", iax_ie2str(ie), ie, len);
 			outputf(tmp);
@@ -957,10 +1025,11 @@ struct iax_frame *iax_frame_new(int direction, int datalen, unsigned int cacheab
 
 	/* Attempt to get a frame from this thread's cache */
 	if ((iax_frames = ast_threadstorage_get(&frame_cache, sizeof(*iax_frames)))) {
-		AST_LIST_TRAVERSE_SAFE_BEGIN(iax_frames, fr, list) {
+		AST_LIST_TRAVERSE_SAFE_BEGIN(&iax_frames->list, fr, list) {
 			if (fr->afdatalen >= datalen) {
 				size_t afdatalen = fr->afdatalen;
-				AST_LIST_REMOVE_CURRENT(iax_frames, list);
+				AST_LIST_REMOVE_CURRENT(&iax_frames->list, list);
+				iax_frames->size--;
 				memset(fr, 0, sizeof(*fr));
 				fr->afdatalen = afdatalen;
 				break;
@@ -1017,11 +1086,14 @@ void iax_frame_free(struct iax_frame *fr)
 		return;
 	}
 
-	fr->direction = 0;
-	AST_LIST_INSERT_HEAD(iax_frames, fr, list);
-#else
-	free(fr);
+	if (iax_frames->size < FRAME_CACHE_MAX_SIZE) {
+		fr->direction = 0;
+		AST_LIST_INSERT_HEAD(&iax_frames->list, fr, list);
+		iax_frames->size++;
+		return;
+	}
 #endif
+	free(fr);
 }
 
 #if !defined(LOW_MEMORY)
@@ -1030,7 +1102,7 @@ static void frame_cache_cleanup(void *data)
 	struct iax_frames *frames = data;
 	struct iax_frame *cur;
 
-	while ((cur = AST_LIST_REMOVE_HEAD(frames, list)))
+	while ((cur = AST_LIST_REMOVE_HEAD(&frames->list, list)))
 		free(cur);
 
 	free(frames);

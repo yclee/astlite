@@ -33,7 +33,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 106235 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
 #include <stdio.h>
 #include <string.h>
@@ -574,9 +574,7 @@ static void mgcp_queue_frame(struct mgcp_subchannel *sub, struct ast_frame *f)
 				ast_mutex_unlock(&sub->owner->lock);
 				break;
 			} else {
-				ast_mutex_unlock(&sub->lock);
-				usleep(1);
-				ast_mutex_lock(&sub->lock);
+				DEADLOCK_AVOIDANCE(&sub->lock);
 			}
 		} else
 			break;
@@ -592,9 +590,7 @@ static void mgcp_queue_hangup(struct mgcp_subchannel *sub)
 				ast_mutex_unlock(&sub->owner->lock);
 				break;
 			} else {
-				ast_mutex_unlock(&sub->lock);
-				usleep(1);
-				ast_mutex_lock(&sub->lock);
+				DEADLOCK_AVOIDANCE(&sub->lock);
 			}
 		} else
 			break;
@@ -1867,7 +1863,7 @@ static int process_sdp(struct mgcp_subchannel *sub, struct mgcp_request *req)
 		ast_log(LOG_WARNING, "Unable to lookup host in c= line, '%s'\n", c);
 		return -1;
 	}
-	if (sscanf(m, "audio %d RTP/AVP %n", &portno, &len) != 1) {
+	if (sscanf(m, "audio %30d RTP/AVP %n", &portno, &len) != 1) {
 		ast_log(LOG_WARNING, "Unable to determine port number for RTP in '%s'\n", m); 
 		return -1;
 	}
@@ -1882,7 +1878,7 @@ static int process_sdp(struct mgcp_subchannel *sub, struct mgcp_request *req)
 	ast_rtp_pt_clear(sub->rtp);
 	codecs = ast_strdupa(m + len);
 	while (!ast_strlen_zero(codecs)) {
-		if (sscanf(codecs, "%d%n", &codec, &len) != 1) {
+		if (sscanf(codecs, "%30d%n", &codec, &len) != 1) {
 			if (codec_count)
 				break;
 			ast_log(LOG_WARNING, "Error in codec string '%s' at '%s'\n", m, codecs);
@@ -1898,7 +1894,7 @@ static int process_sdp(struct mgcp_subchannel *sub, struct mgcp_request *req)
 	sdpLineNum_iterator_init(&iterator);
 	while ((a = get_sdp_iterate(&iterator, req, "a"))[0] != '\0') {
 		char* mimeSubtype = ast_strdupa(a); /* ensures we have enough space */
-		if (sscanf(a, "rtpmap: %u %[^/]/", &codec, mimeSubtype) != 2)
+		if (sscanf(a, "rtpmap: %30u %[^/]/", &codec, mimeSubtype) != 2)
 			continue;
 		/* Note: should really look at the 'freq' and '#chans' params too */
 		ast_rtp_set_rtpmap_type(sub->rtp, codec, "audio", mimeSubtype, 0);
@@ -2032,7 +2028,7 @@ static int transmit_response(struct mgcp_subchannel *sub, char *msg, struct mgcp
 	if (mgr) {
 		/* Store MGCP response in case we have to retransmit */
 		memset(mgr, 0, sizeof(struct mgcp_response));
-		sscanf(req->identifier, "%d", &mgr->seqno);
+		sscanf(req->identifier, "%30d", &mgr->seqno);
 		time(&mgr->whensent);
 		mgr->len = resp.len;
 		memcpy(mgr->buf, resp.data, resp.len);
@@ -2681,7 +2677,7 @@ static void *mgcp_ss(void *data)
 			ast_indicate(chan, -1);
 		} else {
 			/* XXX Redundant?  We should already be playing dialtone */
-			/*tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALTONE);*/
+			/*tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALTONE);*/
 			transmit_notify_request(sub, "L/dl");
 		}
 		if (ast_exists_extension(chan, chan->context, p->dtmf_buf, 1, p->cid_num)) {
@@ -2693,7 +2689,7 @@ static void *mgcp_ss(void *data)
 						ast_verbose(VERBOSE_PREFIX_3 "Setting call forward to '%s' on channel %s\n", 
 							p->call_forward, chan->name);
 					}
-					/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+					/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 					transmit_notify_request(sub, "L/sl");
 					if (res)
 						break;
@@ -2702,7 +2698,7 @@ static void *mgcp_ss(void *data)
 					ast_indicate(chan, -1);
 					sleep(1);
 					memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
-					/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALTONE);*/
+					/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALTONE);*/
 					transmit_notify_request(sub, "L/dl");
 					len = 0;
 					getforward = 0;
@@ -2724,7 +2720,7 @@ static void *mgcp_ss(void *data)
 					res = ast_pbx_run(chan);
 					if (res) {
 						ast_log(LOG_WARNING, "PBX exited non-zero\n");
-						/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_CONGESTION);*/
+						/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_CONGESTION);*/
 						/*transmit_notify_request(p, "nbz", 1);*/
 						transmit_notify_request(sub, "G/cg");
 					}
@@ -2737,7 +2733,7 @@ static void *mgcp_ss(void *data)
 			}
 		} else if (res == 0) {
 			ast_log(LOG_DEBUG, "not enough digits (and no ambiguous match)...\n");
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_CONGESTION);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_CONGESTION);*/
 			transmit_notify_request(sub, "G/cg");
 			/*zt_wait_event(p->subs[index].zfd);*/
 			ast_hangup(chan);
@@ -2749,7 +2745,7 @@ static void *mgcp_ss(void *data)
 			}
 			/* Disable call waiting if enabled */
 			p->callwaiting = 0;
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			len = 0;
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
@@ -2761,7 +2757,7 @@ static void *mgcp_ss(void *data)
 			 */
 			if (ast_pickup_call(chan)) {
 				ast_log(LOG_WARNING, "No call pickup possible...\n");
-				/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_CONGESTION);*/
+				/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_CONGESTION);*/
 				transmit_notify_request(sub, "G/cg");
 			}
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
@@ -2774,7 +2770,7 @@ static void *mgcp_ss(void *data)
 			/* Disable Caller*ID if enabled */
 			p->hidecallerid = 1;
 			ast_set_callerid(chan, "", "", NULL);
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			len = 0;
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
@@ -2785,7 +2781,7 @@ static void *mgcp_ss(void *data)
 				res = ast_say_digit_str(chan, p->lastcallerid, "", chan->language);
 			}
 			if (!res)
-				/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+				/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 				transmit_notify_request(sub, "L/sl");
 			break;
 		} else if (!strcmp(p->dtmf_buf, "*78")) {
@@ -2793,7 +2789,7 @@ static void *mgcp_ss(void *data)
 			if (option_verbose > 2) {
 				ast_verbose(VERBOSE_PREFIX_3 "Enabled DND on channel %s\n", chan->name);
 			}
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			p->dnd = 1;
 			getforward = 0;
@@ -2804,14 +2800,14 @@ static void *mgcp_ss(void *data)
 			if (option_verbose > 2) {
 				ast_verbose(VERBOSE_PREFIX_3 "Disabled DND on channel %s\n", chan->name);
 			}
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			p->dnd = 0;
 			getforward = 0;
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
 			len = 0;
 		} else if (p->cancallforward && !strcmp(p->dtmf_buf, "*72")) {
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			getforward = 1;
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
@@ -2820,7 +2816,7 @@ static void *mgcp_ss(void *data)
 			if (option_verbose > 2) {
 				ast_verbose(VERBOSE_PREFIX_3 "Cancelling call forwarding on channel %s\n", chan->name);
 			}
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			memset(p->call_forward, 0, sizeof(p->call_forward));
 			getforward = 0;
@@ -2841,7 +2837,7 @@ static void *mgcp_ss(void *data)
 			}
 			res = ast_db_put("blacklist", p->lastcallerid, "1");
 			if (!res) {
-				/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+				/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 				transmit_notify_request(sub, "L/sl");
 				memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
 				len = 0;
@@ -2853,7 +2849,7 @@ static void *mgcp_ss(void *data)
 			/* Enable Caller*ID if enabled */
 			p->hidecallerid = 0;
 			ast_set_callerid(chan, p->cid_num, p->cid_name, NULL);
-			/*res = tone_zone_play_tone(p->subs[index].zfd, ZT_TONE_DIALRECALL);*/
+			/*res = tone_zone_play_tone(p->subs[index].zfd, DAHDI_TONE_DIALRECALL);*/
 			transmit_notify_request(sub, "L/sl");
 			len = 0;
 			memset(p->dtmf_buf, 0, sizeof(p->dtmf_buf));
@@ -3324,7 +3320,7 @@ static int find_and_retrans(struct mgcp_subchannel *sub, struct mgcp_request *re
 	time_t now;
 	struct mgcp_response *prev = NULL, *cur, *next, *answer=NULL;
 	time(&now);
-	if (sscanf(req->identifier, "%d", &seqno) != 1) 
+	if (sscanf(req->identifier, "%30d", &seqno) != 1) 
 		seqno = 0;
 	cur = sub->parent->parent->responses;
 	while(cur) {
@@ -3382,7 +3378,7 @@ static int mgcpsock_read(int *id, int fd, short events, void *ignore)
 		return 1;
 	}
 
-	if (sscanf(req.verb, "%d", &result) && sscanf(req.identifier, "%d", &ident)) {
+	if (sscanf(req.verb, "%30d", &result) && sscanf(req.identifier, "%30d", &ident)) {
 		/* Try to find who this message is for, if it's important */
 		sub = find_subchannel_and_lock(NULL, ident, &sin);
 		if (sub) {
@@ -3732,6 +3728,10 @@ static struct mgcp_gateway *build_gateway(char *cat, struct ast_variable *v)
 				canreinvite = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "mailbox")) {
 				ast_copy_string(mailbox, v->value, sizeof(mailbox));
+			} else if (!strcasecmp(v->name, "hasvoicemail")) {
+				if (ast_true(v->value) && ast_strlen_zero(mailbox)) {
+					ast_copy_string(mailbox, gw->name, sizeof(mailbox));
+				}
 			} else if (!strcasecmp(v->name, "adsi")) {
 				adsi = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "callreturn")) {
@@ -4170,7 +4170,7 @@ static int reload_config(void)
 			else
 				capability &= ~format;
 		} else if (!strcasecmp(v->name, "tos")) {
-			if (sscanf(v->value, "%d", &format) == 1)
+			if (sscanf(v->value, "%30d", &format) == 1)
 				tos = format & 0xff;
 			else if (!strcasecmp(v->value, "lowdelay"))
 				tos = IPTOS_LOWDELAY;
@@ -4185,7 +4185,7 @@ static int reload_config(void)
 			else
 				ast_log(LOG_WARNING, "Invalid tos value at line %d, should be 'lowdelay', 'throughput', 'reliability', 'mincost', or 'none'\n", v->lineno);
 		} else if (!strcasecmp(v->name, "port")) {
-			if (sscanf(v->value, "%d", &ourport) == 1) {
+			if (sscanf(v->value, "%30d", &ourport) == 1) {
 				bindaddr.sin_port = htons(ourport);
 			} else {
 				ast_log(LOG_WARNING, "Invalid port number '%s' at line %d of %s\n", v->value, v->lineno, config);

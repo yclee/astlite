@@ -18,6 +18,16 @@
 </member>
 <member name="app_controlplayback" displayname="Control Playback Application" remove_on_change="apps/app_controlplayback.o apps/app_controlplayback.so">
 </member>
+<member name="app_dahdibarge" displayname="Barge in on channel application" remove_on_change="apps/app_dahdibarge.o apps/app_dahdibarge.so">
+	<depend>dahdi</depend>
+</member>
+<member name="app_dahdiras" displayname="DAHDI RAS Application" remove_on_change="apps/app_dahdiras.o apps/app_dahdiras.so">
+	<depend>dahdi</depend>
+	<depend>working_fork</depend>
+</member>
+<member name="app_dahdiscan" displayname="Scan Zap channels application" remove_on_change="apps/app_dahdiscan.o apps/app_dahdiscan.so">
+	<depend>dahdi</depend>
+</member>
 <member name="app_db" displayname="Database Access Functions" remove_on_change="apps/app_db.o apps/app_db.so">
 </member>
 <member name="app_dial" displayname="Dialing Application" remove_on_change="apps/app_dial.o apps/app_dial.so">
@@ -38,11 +48,13 @@
 <member name="app_exec" displayname="Executes dialplan applications" remove_on_change="apps/app_exec.o apps/app_exec.so">
 </member>
 <member name="app_externalivr" displayname="External IVR Interface Application" remove_on_change="apps/app_externalivr.o apps/app_externalivr.so">
+	<depend>working_fork</depend>
 </member>
 <member name="app_festival" displayname="Simple Festival Interface" remove_on_change="apps/app_festival.o apps/app_festival.so">
+	<depend>working_fork</depend>
 </member>
 <member name="app_flash" displayname="Flash channel application" remove_on_change="apps/app_flash.o apps/app_flash.so">
-	<depend>zaptel</depend>
+	<depend>dahdi</depend>
 </member>
 <member name="app_followme" displayname="Find-Me/Follow-Me Application" remove_on_change="apps/app_followme.o apps/app_followme.so">
         <depend>chan_local</depend>
@@ -54,6 +66,7 @@
 <member name="app_hasnewvoicemail" displayname="Indicator for whether a voice mailbox has messages in a given folder." remove_on_change="apps/app_hasnewvoicemail.o apps/app_hasnewvoicemail.so">
 </member>
 <member name="app_ices" displayname="Encode and Stream via icecast and ices" remove_on_change="apps/app_ices.o apps/app_ices.so">
+	<depend>working_fork</depend>
 </member>
 <member name="app_image" displayname="Image Transmission Application" remove_on_change="apps/app_image.o apps/app_image.so">
 </member>
@@ -67,24 +80,27 @@
 <member name="app_macro" displayname="Extension Macros" remove_on_change="apps/app_macro.o apps/app_macro.so">
 </member>
 <member name="app_meetme" displayname="MeetMe conference bridge" remove_on_change="apps/app_meetme.o apps/app_meetme.so">
-	<depend>zaptel</depend>
+	<depend>dahdi</depend>
 </member>
 <member name="app_milliwatt" displayname="Digital Milliwatt (mu-law) Test Application" remove_on_change="apps/app_milliwatt.o apps/app_milliwatt.so">
+	<depend>res_indications</depend>
 </member>
 <member name="app_mixmonitor" displayname="Mixed Audio Monitoring Application" remove_on_change="apps/app_mixmonitor.o apps/app_mixmonitor.so">
 </member>
 <member name="app_morsecode" displayname="Morse code" remove_on_change="apps/app_morsecode.o apps/app_morsecode.so">
 </member>
 <member name="app_mp3" displayname="Silly MP3 Application" remove_on_change="apps/app_mp3.o apps/app_mp3.so">
+	<depend>working_fork</depend>
 </member>
 <member name="app_nbscat" displayname="Silly NBS Stream Application" remove_on_change="apps/app_nbscat.o apps/app_nbscat.so">
+	<depend>working_fork</depend>
 </member>
 <member name="app_osplookup" displayname="Open Settlement Protocol Applications" remove_on_change="apps/app_osplookup.o apps/app_osplookup.so">
 	<depend>osptk</depend>
 	<depend>ssl</depend>
 </member>
 <member name="app_page" displayname="Page Multiple Phones" remove_on_change="apps/app_page.o apps/app_page.so">
-	<depend>zaptel</depend>
+	<depend>dahdi</depend>
 	<depend>app_meetme</depend>
 </member>
 <member name="app_parkandannounce" displayname="Call Parking and Announce Application" remove_on_change="apps/app_parkandannounce.o apps/app_parkandannounce.so">
@@ -107,7 +123,7 @@
 <member name="app_record" displayname="Trivial Record Application" remove_on_change="apps/app_record.o apps/app_record.so">
 </member>
 <member name="app_rpt" displayname="Radio Repeater/Remote Base Application" remove_on_change="apps/app_rpt.o apps/app_rpt.so">
-	<depend>zaptel</depend>
+	<depend>dahdi</depend>
 	<depend>tonezone</depend>
 	<defaultenabled>no</defaultenabled>
 </member>
@@ -159,14 +175,5 @@
 <member name="app_while" displayname="While Loops and Conditional Execution" remove_on_change="apps/app_while.o apps/app_while.so">
 </member>
 <member name="app_zapateller" displayname="Block Telemarketers with Special Information Tone" remove_on_change="apps/app_zapateller.o apps/app_zapateller.so">
-</member>
-<member name="app_zapbarge" displayname="Barge in on Zap channel application" remove_on_change="apps/app_zapbarge.o apps/app_zapbarge.so">
-	<depend>zaptel</depend>
-</member>
-<member name="app_zapras" displayname="Zap RAS Application" remove_on_change="apps/app_zapras.o apps/app_zapras.so">
-	<depend>zaptel</depend>
-</member>
-<member name="app_zapscan" displayname="Scan Zap channels application" remove_on_change="apps/app_zapscan.o apps/app_zapscan.so">
-	<depend>zaptel</depend>
 </member>
 </category>

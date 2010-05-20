@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 105932 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 225171 $")
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -140,18 +140,6 @@ static void destroy(struct ast_trans_pvt *pvt)
 {
 	struct ast_translator *t = pvt->t;
 
-	if (ast_test_flag(&pvt->f, AST_FRFLAG_FROM_TRANSLATOR)) {
-		/* If this flag is still set, that means that the translation path has
-		 * been torn down, while we still have a frame out there being used.
-		 * When ast_frfree() gets called on that frame, this ast_trans_pvt
-		 * will get destroyed, too. */
-
-		/* Set the magic hint that this has been requested to be destroyed. */
-		pvt->datalen = -1;
-
-		return;
-	}
-
 	if (t->destroy)
 		t->destroy(pvt);
 	free(pvt);
@@ -245,9 +233,7 @@ struct ast_frame *ast_trans_frameout(struct ast_trans_pvt *pvt,
 	f->src = pvt->t->name;
 	f->data = pvt->outbuf;
 
-	ast_set_flag(f, AST_FRFLAG_FROM_TRANSLATOR);
-
-	return f;
+	return ast_frisolate(f);
 }
 
 static struct ast_frame *default_frameout(struct ast_trans_pvt *pvt)
@@ -273,7 +259,12 @@ struct ast_trans_pvt *ast_translator_build_path(int dest, int source)
 	
 	source = powerof(source);
 	dest = powerof(dest);
-	
+
+	if (source == -1 || dest == -1) {
+		ast_log(LOG_WARNING, "No translator path: (%s codec is not valid)\n", source == -1 ? "starting" : "ending");
+		return NULL;
+	}
+
 	AST_LIST_LOCK(&translators);
 
 	while (source != dest) {
@@ -504,7 +495,8 @@ static void rebuild_matrix(int samples)
 					tr_matrix[x][z].cost = newcost;
 					tr_matrix[x][z].multistep = 1;
 					if (option_debug)
-						ast_log(LOG_DEBUG, "Discovered %d cost path from %s to %s, via %d\n", tr_matrix[x][z].cost, ast_getformatname(x), ast_getformatname(z), y);
+						ast_log(LOG_DEBUG, "Discovered %d cost path from %s to %s, via %s\n", tr_matrix[x][z].cost,
+							ast_getformatname(1 << x), ast_getformatname(1 << z), ast_getformatname(1 << y));
 					changed++;
 				}
 			}
@@ -579,7 +571,7 @@ static int show_translation_deprecated(int fd, int argc, char *argv[])
 			}
 		}
 		ast_build_string(&buf, &left, "\n");
-		ast_cli(fd, line);			
+		ast_cli(fd, "%s", line);			
 	}
 	AST_LIST_UNLOCK(&translators);
 	return RESULT_SUCCESS;
@@ -648,7 +640,7 @@ static int show_translation(int fd, int argc, char *argv[])
 			}
 		}
 		ast_build_string(&buf, &left, "\n");
-		ast_cli(fd, line);			
+		ast_cli(fd, "%s", line);			
 	}
 	AST_LIST_UNLOCK(&translators);
 	return RESULT_SUCCESS;
@@ -694,6 +686,10 @@ int __ast_register_translator(struct ast_translator *t, struct ast_module *mod)
 	t->dstfmt = powerof(t->dstfmt);
 	t->active = 1;
 
+	if (t->srcfmt == -1 || t->dstfmt == -1) {
+		ast_log(LOG_WARNING, "Invalid translator path: (%s codec is not valid)\n", t->srcfmt == -1 ? "starting" : "ending");
+		return -1;
+	}
 	if (t->plc_samples) {
 		if (t->buffer_samples < t->plc_samples) {
 			ast_log(LOG_WARNING, "plc_samples %d buffer_samples %d\n",
@@ -868,6 +864,10 @@ unsigned int ast_translate_path_steps(unsigned int dest, unsigned int src)
 	src = powerof(src);
 	dest = powerof(dest);
 
+	if (src == -1 || dest == -1) {
+		ast_log(LOG_WARNING, "No translator path: (%s codec is not valid)\n", src == -1 ? "starting" : "ending");
+		return -1;
+	}
 	AST_LIST_LOCK(&translators);
 
 	if (tr_matrix[src][dest].step)
@@ -906,7 +906,7 @@ unsigned int ast_translate_available_formats(unsigned int dest, unsigned int src
 	   destination format. */
 	for (x = 1; src_audio && x < AST_FORMAT_MAX_AUDIO; x <<= 1) {
 		/* if this is not a desired format, nothing to do */
-		if (!dest & x)
+		if (!(dest & x))
 			continue;
 
 		/* if the source is supplying this format, then
@@ -932,7 +932,7 @@ unsigned int ast_translate_available_formats(unsigned int dest, unsigned int src
 	   destination format. */
 	for (; src_video && x < AST_FORMAT_MAX_VIDEO; x <<= 1) {
 		/* if this is not a desired format, nothing to do */
-		if (!dest & x)
+		if (!(dest & x))
 			continue;
 
 		/* if the source is supplying this format, then
@@ -955,18 +955,4 @@ unsigned int ast_translate_available_formats(unsigned int dest, unsigned int src
 	AST_LIST_UNLOCK(&translators);
 
 	return res;
-}
-
-void ast_translate_frame_freed(struct ast_frame *fr)
-{
-	struct ast_trans_pvt *pvt;
-
-	ast_clear_flag(fr, AST_FRFLAG_FROM_TRANSLATOR);
-
-	pvt = (struct ast_trans_pvt *) (((char *) fr) - offsetof(struct ast_trans_pvt, f));
-
-	if (pvt->datalen != -1)
-		return;
-	
-	destroy(pvt);
 }

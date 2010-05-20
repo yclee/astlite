@@ -5,6 +5,13 @@
 <member name="chan_alsa" displayname="ALSA Console Channel Driver" remove_on_change="channels/chan_alsa.o channels/chan_alsa.so">
 	<depend>asound</depend>
 </member>
+<member name="chan_dahdi" displayname="DAHDI Telephony" remove_on_change="channels/chan_dahdi.o channels/chan_dahdi.so">
+	<depend>res_smdi</depend>
+	<depend>dahdi</depend>
+	<depend>tonezone</depend>
+	<depend>res_features</depend>
+	<use>pri</use>
+</member>
 <member name="chan_features" displayname="Feature Proxy Channel" remove_on_change="channels/chan_features.o channels/chan_features.so">
         <defaultenabled>no</defaultenabled>
 </member>
@@ -18,7 +25,7 @@
 	<defaultenabled>yes</defaultenabled>
 </member>
 <member name="chan_iax2" displayname="Inter Asterisk eXchange (Ver 2)" remove_on_change="channels/chan_iax2.o channels/chan_iax2.so">
-	<use>zaptel</use>
+	<use>dahdi</use>
         <depend>res_features</depend>
 </member>
 <member name="chan_local" displayname="Local Proxy Channel (Note: used internally by other modules)" remove_on_change="channels/chan_local.o channels/chan_local.so">
@@ -45,15 +52,7 @@
 </member>
 <member name="chan_skinny" displayname="Skinny Client Control Protocol (Skinny)" remove_on_change="channels/chan_skinny.o channels/chan_skinny.so">
 </member>
-<member name="chan_zap" displayname="Zapata Telephony" remove_on_change="channels/chan_zap.o channels/chan_zap.so">
-	<depend>res_smdi</depend>
-	<depend>zaptel_vldtmf</depend>
-	<depend>zaptel</depend>
-	<depend>tonezone</depend>
-	<depend>res_features</depend>
-	<use>pri</use>
-</member>
-<member name="chan_vpb" displayname="" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
+<member name="chan_vpb" displayname="Voicetronix API driver" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
 	<depend>vpbapi</depend>
 </member>
 </category>

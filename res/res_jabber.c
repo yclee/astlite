@@ -33,7 +33,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 105326 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 198370 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -629,8 +629,7 @@ static int aji_act_hook(void *data, int type, iks *node)
 				sprintf(secret, "%s%s", pak->id, client->password);
 				ast_sha1_hash(shasum, secret);
 				handshake = NULL;
-				asprintf(&handshake, "<handshake>%s</handshake>", shasum);
-				if (handshake) {
+				if (asprintf(&handshake, "<handshake>%s</handshake>", shasum) > 0) {
 					iks_send_raw(client->p, handshake);
 					free(handshake);
 					handshake = NULL;
@@ -1565,7 +1564,7 @@ static void *aji_recv_loop(void *data)
 		else if (res == IKS_NET_TLSFAIL)
 			ast_log(LOG_WARNING, "JABBER:  Failure in TLS.\n");
 		else if (client->timeout == 0 && client->state == AJI_CONNECTED) {
-			res = iks_send_raw(client->p, " ");
+			res = client->keepalive ? iks_send_raw(client->p, " ") : IKS_OK;
 			if(res == IKS_OK)
 				client->timeout = 50;
 			else
@@ -2205,8 +2204,7 @@ static int aji_create_client(char *label, struct ast_variable *var, int debug)
 	}
 	if (!strchr(client->user, '/') && !client->component) { /*client */
 		resource = NULL;
-		asprintf(&resource, "%s/asterisk", client->user);
-		if (resource) {
+		if (asprintf(&resource, "%s/asterisk", client->user) > 0) {
 			client->jid = iks_id_new(client->stack, resource);
 			free(resource);
 		}
@@ -2222,8 +2220,7 @@ static int aji_create_client(char *label, struct ast_variable *var, int debug)
 	}
 	if (!strchr(client->user, '/') && !client->component) { /*client */
 		resource = NULL;
-		asprintf(&resource, "%s/asterisk", client->user);
-		if (resource) {
+		if (asprintf(&resource, "%s/asterisk", client->user) > 0) {
 			client->jid = iks_id_new(client->stack, resource);
 			free(resource);
 		}
@@ -2359,17 +2356,30 @@ static int aji_load_config(void)
 }
 
 /*!
- * \brief grab a aji_client structure by label name.
- * \param void. 
- * \return 1.
+  * \brief grab a aji_client structure by label name or JID 
+  * (without the resource string)
+  * \param name label or JID 
+  * \return aji_client.
  */
 struct aji_client *ast_aji_get_client(const char *name)
 {
 	struct aji_client *client = NULL;
+	char *aux = NULL;
 
 	client = ASTOBJ_CONTAINER_FIND(&clients, name);
-	if (!client && !strchr(name, '@'))
-		client = ASTOBJ_CONTAINER_FIND_FULL(&clients, name, user,,, strcasecmp);
+ 	if (!client && strchr(name, '@')) {
+ 		ASTOBJ_CONTAINER_TRAVERSE(&clients, 1, {
+ 			aux = ast_strdupa(iterator->user);
+ 			if (strchr(aux, '/')) {
+ 				/* strip resource for comparison */
+ 				aux = strsep(&aux, "/");
+ 			}
+ 			if (!strncasecmp(aux, name, strlen(aux))) {
+ 				client = iterator;
+ 			}				
+ 		});
+ 	}
+ 
 	return client;
 }
 
@@ -2413,16 +2423,16 @@ static int manager_jabber_send(struct mansession *s, const struct message *m)
 		astman_send_error(s, m, "Could not find Sender");
 		return 0;
 	}	
-	if (strchr(screenname, '@') && message){
-		ast_aji_send(client, screenname, message);	
-		if (!ast_strlen_zero(id))
-			astman_append(s, "ActionID: %s\r\n",id);
+	if (strchr(screenname, '@') && message) {
+		ast_aji_send(client, screenname, message);
 		astman_append(s, "Response: Success\r\n");
-		return 0;
+	} else {
+		astman_append(s, "Response: Failure\r\n");
 	}
-	if (!ast_strlen_zero(id))
-		astman_append(s, "ActionID: %s\r\n",id);
-	astman_append(s, "Response: Failure\r\n");
+	if (!ast_strlen_zero(id)) {
+		astman_append(s, "ActionID: %s\r\n", id);
+	}
+	astman_append(s, "\r\n");
 	return 0;
 }
 

@@ -88,7 +88,6 @@ struct pval
 		struct pval *statements; /* used in case, default, catch, while's statement, CONTEXT elements, GLOBALS */
 		char *val;  /* used in VARDEC */
 		char *for_test; /* used in FOR */
-		int label_in_case; /* a boolean for LABELs */
 		struct pval *goto_target;  /* used in GOTO */
 	} u2;
 	
@@ -178,7 +177,8 @@ struct ael_extension
 	char *hints;
 	int regexten;
 	int is_switch;
-	int has_switch;
+	int has_switch; /* set if a switch exists in the extension */
+	int checked_switch; /* set if we checked for a switch in the extension -- so we don't have to do it again */
 	
 	struct ast_context *context;
 	

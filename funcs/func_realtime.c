@@ -26,7 +26,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 87340 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 206807 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,12 +86,14 @@ static int function_realtime_read(struct ast_channel *chan, char *cmd, char *dat
 		return -1;
 	}
 	for (var = head; var; var = var->next)
-		resultslen += strlen(var->name) + strlen(var->value) + 2;
+		resultslen += strlen(var->name) + strlen(var->value) + strlen(args.delim1) + strlen(args.delim2);
 
 	result_begin = results = alloca(resultslen);
 	for (var = head; var; var = var->next)
 		ast_build_string(&results, &resultslen, "%s%s%s%s", var->name, args.delim2, var->value, args.delim1);
 	ast_copy_string(buf, result_begin, len);
+
+	ast_variables_destroy(head);
 
 	ast_module_user_remove(u);
 

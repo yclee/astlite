@@ -36,7 +36,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 99775 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -247,17 +247,21 @@ static int load_odbc_config(void)
 					if (ast_true(v->value))
 						pooling = 1;
 				} else if (!strcasecmp(v->name, "limit")) {
-					sscanf(v->value, "%d", &limit);
+					sscanf(v->value, "%4d", &limit);
 					if (ast_true(v->value) && !limit) {
 						ast_log(LOG_WARNING, "Limit should be a number, not a boolean: '%s'.  Setting limit to 1023 for ODBC class '%s'.\n", v->value, cat);
 						limit = 1023;
 					} else if (ast_false(v->value)) {
-						ast_log(LOG_WARNING, "Limit should be a number, not a boolean: '%s'.  Disabling ODBC class '%s'.\n", v->value, cat);
-						enabled = 0;
+						/* Limit=no probably means "no limit", which is the maximum */
+						ast_log(LOG_WARNING, "Limit should be a number, not a boolean: '%s'.  Setting limit to 1023 for ODBC class '%s'.\n", v->value, cat);
+						limit = 1023;
 						break;
+					} else if (limit > 1023) {
+						ast_log(LOG_WARNING, "Maximum limit in 1.4 is 1023.  Setting limit to 1023 for ODBC class '%s'.\n", cat);
+						limit = 1023;
 					}
 				} else if (!strcasecmp(v->name, "idlecheck")) {
-					sscanf(v->value, "%d", &idlecheck);
+					sscanf(v->value, "%30u", &idlecheck);
 				} else if (!strcasecmp(v->name, "enabled")) {
 					enabled = ast_true(v->value);
 				} else if (!strcasecmp(v->name, "pre-connect")) {
@@ -482,16 +486,33 @@ struct odbc_obj *ast_odbc_request_obj(const char *name, int check)
 static odbc_status odbc_obj_disconnect(struct odbc_obj *obj)
 {
 	int res;
+	SQLINTEGER err;
+	short int mlen;
+	unsigned char msg[200], stat[10];
+
+	/* Nothing to disconnect */
+	if (!obj->con) {
+		return ODBC_SUCCESS;
+	}
+
 	ast_mutex_lock(&obj->lock);
 
 	res = SQLDisconnect(obj->con);
 
-	if (res == ODBC_SUCCESS) {
-		ast_log(LOG_WARNING, "res_odbc: disconnected %d from %s [%s]\n", res, obj->parent->name, obj->parent->dsn);
+	if (res == SQL_SUCCESS || res == SQL_SUCCESS_WITH_INFO) {
+		ast_log(LOG_DEBUG, "Disconnected %d from %s [%s]\n", res, obj->parent->name, obj->parent->dsn);
 	} else {
-		ast_log(LOG_WARNING, "res_odbc: %s [%s] already disconnected\n",
-		obj->parent->name, obj->parent->dsn);
+		ast_log(LOG_DEBUG, "res_odbc: %s [%s] already disconnected\n", obj->parent->name, obj->parent->dsn);
 	}
+
+	if ((res = SQLFreeHandle(SQL_HANDLE_DBC, obj->con) == SQL_SUCCESS)) {
+		obj->con = NULL;
+		ast_log(LOG_DEBUG, "Database handle deallocated\n");
+	} else {
+		SQLGetDiagRec(SQL_HANDLE_DBC, obj->con, 1, stat, &err, msg, 100, &mlen);
+		ast_log(LOG_WARNING, "Unable to deallocate database handle? %d errno=%d %s\n", res, (int)err, msg);
+	}
+
 	obj->up = 0;
 	ast_mutex_unlock(&obj->lock);
 	return ODBC_SUCCESS;
@@ -509,6 +530,13 @@ static odbc_status odbc_obj_connect(struct odbc_obj *obj)
 #endif
 	ast_mutex_lock(&obj->lock);
 
+	if (obj->up) {
+		odbc_obj_disconnect(obj);
+		ast_log(LOG_NOTICE, "Re-connecting %s\n", obj->parent->name);
+	} else {
+		ast_log(LOG_NOTICE, "Connecting %s\n", obj->parent->name);
+	}
+
 	res = SQLAllocHandle(SQL_HANDLE_DBC, obj->parent->env, &obj->con);
 
 	if ((res != SQL_SUCCESS) && (res != SQL_SUCCESS_WITH_INFO)) {
@@ -522,13 +550,6 @@ static odbc_status odbc_obj_connect(struct odbc_obj *obj)
 	SQLSetConnectAttr(obj->con, SQL_ATTR_TRACE, &enable, SQL_IS_INTEGER);
 	SQLSetConnectAttr(obj->con, SQL_ATTR_TRACEFILE, tracefile, strlen(tracefile));
 #endif
-
-	if (obj->up) {
-		odbc_obj_disconnect(obj);
-		ast_log(LOG_NOTICE, "Re-connecting %s\n", obj->parent->name);
-	} else {
-		ast_log(LOG_NOTICE, "Connecting %s\n", obj->parent->name);
-	}
 
 	res = SQLConnect(obj->con,
 		   (SQLCHAR *) obj->parent->dsn, SQL_NTS,
@@ -589,7 +610,7 @@ static int reload(void)
 					if (!strcasecmp(v->name, "pooling")) {
 						pooling = 1;
 					} else if (!strcasecmp(v->name, "limit")) {
-						sscanf(v->value, "%d", &limit);
+						sscanf(v->value, "%4d", &limit);
 						if (ast_true(v->value) && !limit) {
 							ast_log(LOG_WARNING, "Limit should be a number, not a boolean: '%s'.  Setting limit to 1023 for ODBC class '%s'.\n", v->value, cat);
 							limit = 1023;
@@ -599,7 +620,7 @@ static int reload(void)
 							break;
 						}
 					} else if (!strcasecmp(v->name, "idlecheck")) {
-						sscanf(v->value, "%ud", &idlecheck);
+						sscanf(v->value, "%30u", &idlecheck);
 					} else if (!strcasecmp(v->name, "enabled")) {
 						enabled = ast_true(v->value);
 					} else if (!strcasecmp(v->name, "pre-connect")) {

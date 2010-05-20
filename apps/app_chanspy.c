@@ -31,13 +31,14 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 110083 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 234094 $")
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <errno.h>
 
 #include "asterisk/file.h"
 #include "asterisk/logger.h"
@@ -54,6 +55,10 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 110083 $")
 #include "asterisk/lock.h"
 
 #define AST_NAME_STRLEN 256
+
+/* "Zap/pseudo" is ten characters.
+ * "DAHDI/pseudo" is twelve characters.
+ */
 
 static const char *tdesc = "Listen to a channel, and optionally whisper into it";
 static const char *app_chan = "ChanSpy";
@@ -72,7 +77,7 @@ static const char *desc_chan =
 "  Options:\n"
 "    b             - Only spy on channels involved in a bridged call.\n"
 "    g(grp)        - Match only channels where their ${SPYGROUP} variable is set to\n"
-"                    contain 'grp' in an optional : delimited list.\n"
+"                    contain 'grp'.\n"
 "    q             - Don't play a beep when beginning to spy on a channel, or speak the\n"
 "                    selected channel name.\n"
 "    r[(basename)] - Record the session to the monitor spool directory. An\n"
@@ -100,7 +105,7 @@ static const char *desc_ext =
 "  Options:\n"
 "    b             - Only spy on channels involved in a bridged call.\n"
 "    g(grp)        - Match only channels where their ${SPYGROUP} variable is set to\n"
-"                    contain 'grp' in an optional : delimited list.\n"
+"                    contain 'grp'.\n"
 "    q             - Don't play a beep when beginning to spy on a channel, or speak the\n"
 "                    selected channel name.\n"
 "    r[(basename)] - Record the session to the monitor spool directory. An\n"
@@ -142,6 +147,7 @@ AST_APP_OPTIONS(spy_opts, {
 	AST_APP_OPTION_ARG('r', OPTION_RECORD, OPT_ARG_RECORD),
 });
 
+static int next_unique_id_to_use = 0;
 
 struct chanspy_translation_helper {
 	/* spy data */
@@ -165,7 +171,7 @@ static void spy_release(struct ast_channel *chan, void *data)
 static int spy_generate(struct ast_channel *chan, void *data, int len, int samples) 
 {
 	struct chanspy_translation_helper *csth = data;
-	struct ast_frame *f;
+	struct ast_frame *f, *cur;
 
 	ast_audiohook_lock(&csth->spy_audiohook);
 	if (csth->spy_audiohook.status != AST_AUDIOHOOK_STATUS_RUNNING) {
@@ -180,13 +186,18 @@ static int spy_generate(struct ast_channel *chan, void *data, int len, int sampl
 	if (!f)
 		return 0;
 		
-	if (ast_write(chan, f)) {
-		ast_frfree(f);
-		return -1;
-	}
+	for (cur = f; cur; cur = AST_LIST_NEXT(cur, frame_list)) {
+		if (ast_write(chan, cur)) {
+			ast_frfree(f);
+			return -1;
+		}
 
-	if (csth->fd)
-		write(csth->fd, f->data, f->datalen);
+		if (csth->fd) {
+			if (write(csth->fd, cur->data, cur->datalen) < 0) {
+				ast_log(LOG_WARNING, "write() failed: %s\n", strerror(errno));
+			}
+		}
+	}
 
 	ast_frfree(f);
 
@@ -206,19 +217,19 @@ static int start_spying(struct ast_channel *chan, const char *spychan_name, stru
 
 	ast_log(LOG_NOTICE, "Attaching %s to %s\n", spychan_name, chan->name);
 
+	ast_set_flag(audiohook, AST_AUDIOHOOK_TRIGGER_SYNC | AST_AUDIOHOOK_SMALL_QUEUE);
+
 	res = ast_audiohook_attach(chan, audiohook);
 
-	if (!res && ast_test_flag(chan, AST_FLAG_NBRIDGE) && (peer = ast_bridged_channel(chan))) {
-		ast_channel_unlock(chan);
+	if (!res && ast_test_flag(chan, AST_FLAG_NBRIDGE) && (peer = ast_bridged_channel(chan))) { 
 		ast_softhangup(peer, AST_SOFTHANGUP_UNBRIDGE);	
-	} else
-		ast_channel_unlock(chan);
-
+	}
 	return res;
 }
 
 struct chanspy_ds {
 	struct ast_channel *chan;
+	char unique_id[20];
 	ast_mutex_t lock;
 };
 
@@ -239,9 +250,10 @@ static int channel_spy(struct ast_channel *chan, struct chanspy_ds *spyee_chansp
 	ast_channel_unlock(chan);
 
 	ast_mutex_lock(&spyee_chanspy_ds->lock);
-	if (spyee_chanspy_ds->chan) {
-		spyee = spyee_chanspy_ds->chan;
-		ast_channel_lock(spyee);
+	while ((spyee = spyee_chanspy_ds->chan) && ast_channel_trylock(spyee)) {
+		/* avoid a deadlock here, just in case spyee is masqueraded and
+		 * chanspy_ds_chan_fixup() is called with the channel locked */
+		DEADLOCK_AVOIDANCE(&spyee_chanspy_ds->lock);
 	}
 	ast_mutex_unlock(&spyee_chanspy_ds->lock);
 
@@ -263,16 +275,18 @@ static int channel_spy(struct ast_channel *chan, struct chanspy_ds *spyee_chansp
 	
 	ast_audiohook_init(&csth.spy_audiohook, AST_AUDIOHOOK_TYPE_SPY, "ChanSpy");
 
-	if (start_spying(spyee, spyer_name, &csth.spy_audiohook)) { /* Unlocks spyee */
+	if (start_spying(spyee, spyer_name, &csth.spy_audiohook)) {
 		ast_audiohook_destroy(&csth.spy_audiohook);
+		ast_channel_unlock(spyee);
 		return 0;
 	}
 	
 	if (ast_test_flag(flags, OPTION_WHISPER)) {
 		ast_audiohook_init(&csth.whisper_audiohook, AST_AUDIOHOOK_TYPE_WHISPER, "ChanSpy");
-		start_spying(spyee, spyer_name, &csth.whisper_audiohook); /* Unlocks spyee */
+		start_spying(spyee, spyer_name, &csth.whisper_audiohook);
 	}
 
+	ast_channel_unlock(spyee);
 	spyee = NULL;
 
 	csth.volfactor = *volfactor;
@@ -409,18 +423,21 @@ static const struct ast_datastore_info chanspy_ds_info = {
 
 static struct chanspy_ds *chanspy_ds_free(struct chanspy_ds *chanspy_ds)
 {
-	if (!chanspy_ds)
+	struct ast_channel *chan;
+
+	if (!chanspy_ds) {
 		return NULL;
+	}
 
 	ast_mutex_lock(&chanspy_ds->lock);
-	if (chanspy_ds->chan) {
+	while ((chan = chanspy_ds->chan)) {
 		struct ast_datastore *datastore;
-		struct ast_channel *chan;
 
-		chan = chanspy_ds->chan;
-
-		ast_channel_lock(chan);
-		if ((datastore = ast_channel_datastore_find(chan, &chanspy_ds_info, NULL))) {
+		if (ast_channel_trylock(chan)) {
+			DEADLOCK_AVOIDANCE(&chanspy_ds->lock);
+			continue;
+		}
+		if ((datastore = ast_channel_datastore_find(chan, &chanspy_ds_info, chanspy_ds->unique_id))) {
 			ast_channel_datastore_remove(chan, datastore);
 			/* chanspy_ds->chan is NULL after this call */
 			chanspy_ds_destroy(datastore->data);
@@ -428,6 +445,7 @@ static struct chanspy_ds *chanspy_ds_free(struct chanspy_ds *chanspy_ds)
 			ast_channel_datastore_free(datastore);
 		}
 		ast_channel_unlock(chan);
+		break;
 	}
 	ast_mutex_unlock(&chanspy_ds->lock);
 
@@ -441,7 +459,7 @@ static struct chanspy_ds *setup_chanspy_ds(struct ast_channel *chan, struct chan
 
 	ast_mutex_lock(&chanspy_ds->lock);
 
-	if (!(datastore = ast_channel_datastore_alloc(&chanspy_ds_info, NULL))) {
+	if (!(datastore = ast_channel_datastore_alloc(&chanspy_ds_info, chanspy_ds->unique_id))) {
 		ast_mutex_unlock(&chanspy_ds->lock);
 		chanspy_ds = chanspy_ds_free(chanspy_ds);
 		ast_channel_unlock(chan);
@@ -460,6 +478,12 @@ static struct chanspy_ds *next_channel(struct ast_channel *chan,
 	const char *exten, const char *context, struct chanspy_ds *chanspy_ds)
 {
 	struct ast_channel *this;
+	char channel_name[AST_CHANNEL_NAME];
+	static size_t PSEUDO_CHAN_LEN = 0;
+
+	if (!PSEUDO_CHAN_LEN) {
+		PSEUDO_CHAN_LEN = *dahdi_chan_name_len + strlen("/pseudo");
+	}
 
 redo:
 	if (spec)
@@ -472,7 +496,9 @@ redo:
 	if (!this)
 		return NULL;
 
-	if (!strncmp(this->name, "Zap/pseudo", 10)) {
+	snprintf(channel_name, AST_CHANNEL_NAME, "%s/pseudo", dahdi_chan_name);
+	if (!strncmp(this->name, channel_name, PSEUDO_CHAN_LEN)) {
+		last = this;
 		ast_channel_unlock(this);
 		goto redo;
 	} else if (this == chan) {
@@ -496,9 +522,11 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 	char *ptr;
 	int num;
 	int num_spyed_upon = 1;
-	struct chanspy_ds chanspy_ds;
+	struct chanspy_ds chanspy_ds = { 0, };
 
 	ast_mutex_init(&chanspy_ds.lock);
+
+	snprintf(chanspy_ds.unique_id, sizeof(chanspy_ds.unique_id), "%d", ast_atomic_fetchadd_int(&next_unique_id_to_use, +1));
 
 	if (chan->_state != AST_STATE_UP)
 		ast_answer(chan);
@@ -540,10 +568,9 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 			int igrp = !mygroup;
 			char *groups[25];
 			int num_groups = 0;
-			char *dup_group;
+			char dup_group[512];
 			int x;
 			char *s;
-			struct ast_channel *peer;
 
 			peer = peer_chanspy_ds->chan;
 
@@ -573,7 +600,7 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 
 			if (mygroup) {
 				if ((group = pbx_builtin_getvar_helper(peer, "SPYGROUP"))) {
-					dup_group = ast_strdupa(group);
+					ast_copy_string(dup_group, group, sizeof(dup_group));
 					num_groups = ast_app_separate_args(dup_group, ':', groups,
 									   sizeof(groups) / sizeof(groups[0]));
 				}
@@ -599,12 +626,11 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 			for (s = peer_name; s < ptr; s++)
 				*s = tolower(*s);
 
-		
 			/* We have to unlock the peer channel here to avoid a deadlock.
-			 * So, when we need it again, we have to lock the datastore and get
-			 * the pointer from there to see if the channel is still valid. */
+			 * So, when we need to dereference it again, we have to lock the 
+			 * datastore and get the pointer from there to see if the channel 
+			 * is still valid. */
 			ast_channel_unlock(peer);
-			peer = NULL;
 
 			if (!ast_test_flag(flags, OPTION_QUIET)) {
 				if (ast_fileexists(peer_name, NULL, NULL) != -1) {
@@ -621,7 +647,6 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 					ast_say_digits(chan, atoi(ptr), "", chan->language);
 			}
 			
-			waitms = 5000;
 			res = channel_spy(chan, peer_chanspy_ds, &volfactor, fd, flags);
 			num_spyed_upon++;	
 
@@ -662,6 +687,8 @@ static int common_exec(struct ast_channel *chan, const struct ast_flags *flags,
 
 	ast_channel_setoption(chan, AST_OPTION_TXGAIN, &zero_volume, sizeof(zero_volume), 0);
 
+	ast_mutex_lock(&chanspy_ds.lock);
+	ast_mutex_unlock(&chanspy_ds.lock);
 	ast_mutex_destroy(&chanspy_ds.lock);
 
 	return res;
@@ -709,7 +736,7 @@ static int chanspy_exec(struct ast_channel *chan, void *data)
 		if (ast_test_flag(&flags, OPTION_VOLUME) && opts[OPT_ARG_VOLUME]) {
 			int vol;
 
-			if ((sscanf(opts[OPT_ARG_VOLUME], "%d", &vol) != 1) || (vol > 4) || (vol < -4))
+			if ((sscanf(opts[OPT_ARG_VOLUME], "%30d", &vol) != 1) || (vol > 4) || (vol < -4))
 				ast_log(LOG_NOTICE, "Volume factor must be a number between -4 and 4\n");
 			else
 				volfactor = vol;
@@ -728,7 +755,7 @@ static int chanspy_exec(struct ast_channel *chan, void *data)
 	}
 
 	if (recbase) {
-		char filename[512];
+		char filename[PATH_MAX];
 
 		snprintf(filename, sizeof(filename), "%s/%s.%d.raw", ast_config_AST_MONITOR_DIR, recbase, (int) time(NULL));
 		if ((fd = open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644)) <= 0) {
@@ -794,7 +821,7 @@ static int extenspy_exec(struct ast_channel *chan, void *data)
 		if (ast_test_flag(&flags, OPTION_VOLUME) && opts[OPT_ARG_VOLUME]) {
 			int vol;
 
-			if ((sscanf(opts[OPT_ARG_VOLUME], "%d", &vol) != 1) || (vol > 4) || (vol < -4))
+			if ((sscanf(opts[OPT_ARG_VOLUME], "%30d", &vol) != 1) || (vol > 4) || (vol < -4))
 				ast_log(LOG_NOTICE, "Volume factor must be a number between -4 and 4\n");
 			else
 				volfactor = vol;
@@ -813,7 +840,7 @@ static int extenspy_exec(struct ast_channel *chan, void *data)
 	}
 
 	if (recbase) {
-		char filename[512];
+		char filename[PATH_MAX];
 
 		snprintf(filename, sizeof(filename), "%s/%s.%d.raw", ast_config_AST_MONITOR_DIR, recbase, (int) time(NULL));
 		if ((fd = open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644)) <= 0) {

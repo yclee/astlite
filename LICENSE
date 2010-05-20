@@ -7,15 +7,8 @@ source tree in the file COPYING.
 
 This package also includes various components that are not part of
 Asterisk itself; these components are in the 'contrib' directory
-and its subdirectories. Most of these components are also
-distributed under the GPL version 2 as well, except for the following:
-
-contrib/firmware/iax/iaxy.bin:
-	This file is Copyright (C) Digium, Inc. and is licensed for
-	use with Digium IAXy hardware devices only. It can be
-	distributed freely as long as the distribution is in the
-	original form present in this package (not reformatted or
-	modified).
+and its subdirectories. These components are also distributed under the
+GPL version 2 as well.
 
 Digium, Inc. (formerly Linux Support Services) holds copyright
 and/or sufficient licenses to all components of the Asterisk
@@ -31,8 +24,8 @@ there is no requirement that you provide the same exception in your
 GPL'd products (although if you've written a module for Asterisk we
 would strongly encourage you to make the same exception that we do).
 
-Specific permission is also granted to link Asterisk with OpenSSL and
-OpenH323 and distribute the resulting binary files.
+Specific permission is also granted to link Asterisk with OpenSSL, OpenH323
+and/or the UW IMAP Toolkit and distribute the resulting binary files.
 
 In addition, Asterisk implements two management/control protocols: the
 Asterisk Manager Interface (AMI) and the Asterisk Gateway Interface
@@ -59,7 +52,7 @@ contact us:
 +1.877.344.4861 (via telephone in the USA)
 +1.256.428.6000 (via telephone outside the USA)
 +1.256.864.0464 (via FAX inside or outside the USA)
-IAX2/misery.digium.com/6000 (via IAX2)
+IAX2/pbx.digium.com (via IAX2)
 licensing@digium.com (via email)
 
 Digium, Inc.

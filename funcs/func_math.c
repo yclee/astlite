@@ -26,7 +26,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 67162 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 241765 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -78,14 +78,14 @@ static int math(struct ast_channel *chan, char *cmd, char *parse,
 	);
 
 	if (ast_strlen_zero(parse)) {
-		ast_log(LOG_WARNING, "Syntax: Math(<number1><op><number 2>[,<type_of_result>]) - missing argument!\n");
+		ast_log(LOG_WARNING, "Syntax: MATH(<number1><op><number 2>[,<type_of_result>]) - missing argument!\n");
 		return -1;
 	}
 
 	AST_STANDARD_APP_ARGS(args, parse);
 
 	if (args.argc < 1) {
-		ast_log(LOG_WARNING, "Syntax: Math(<number1><op><number 2>[,<type_of_result>]) - missing argument!\n");
+		ast_log(LOG_WARNING, "Syntax: MATH(<number1><op><number 2>[,<type_of_result>]) - missing argument!\n");
 		return -1;
 	}
 
@@ -165,12 +165,12 @@ static int math(struct ast_channel *chan, char *cmd, char *parse,
 		return -1;
 	}
 
-	if (sscanf(mvalue1, "%lf", &fnum1) != 1) {
+	if (sscanf(mvalue1, "%30lf", &fnum1) != 1) {
 		ast_log(LOG_WARNING, "'%s' is not a valid number\n", mvalue1);
 		return -1;
 	}
 
-	if (sscanf(mvalue2, "%lf", &fnum2) != 1) {
+	if (sscanf(mvalue2, "%30lf", &fnum2) != 1) {
 		ast_log(LOG_WARNING, "'%s' is not a valid number\n", mvalue2);
 		return -1;
 	}
@@ -199,7 +199,11 @@ static int math(struct ast_channel *chan, char *cmd, char *parse,
 			int inum1 = fnum1;
 			int inum2 = fnum2;
 
-			ftmp = (inum1 % inum2);
+			if (inum2 == 0) {
+				ftmp = 0;
+			} else {
+				ftmp = (inum1 % inum2);
+			}
 
 			break;
 		}

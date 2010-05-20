@@ -16,7 +16,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 105572 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 174148 $")
 
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
@@ -573,9 +573,9 @@ static u_char *ast_var_channel_types_table(struct variable *vp, oid *name, size_
 	case ASTCHANTYPECHANNELS:
 		long_ret = 0;
 		for (chan = ast_channel_walk_locked(NULL); chan; chan = ast_channel_walk_locked(chan)) {
-			ast_channel_unlock(chan);
 			if (chan->tech == tech)
 				long_ret++;
+			ast_channel_unlock(chan);
 		}
 		return (u_char *)&long_ret;
 	default:

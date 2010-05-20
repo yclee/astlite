@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 80547 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 146799 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -80,7 +80,7 @@ static int timeout_read(struct ast_channel *chan, char *cmd, char *data,
 
 	default:
 		ast_log(LOG_ERROR, "Unknown timeout type specified.\n");
-		break;
+		return -1;
 	}
 
 	return 0;

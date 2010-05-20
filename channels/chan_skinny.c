@@ -28,7 +28,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109171 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -564,8 +564,8 @@ static const uint8_t soft_key_default_onhook[] = {
 	SOFTKEY_NEWCALL,
 	SOFTKEY_CFWDALL,
 	SOFTKEY_CFWDBUSY,
-	SOFTKEY_GPICKUP,
-	SOFTKEY_CONFRN,
+	/*SOFTKEY_GPICKUP,
+	SOFTKEY_CONFRN,*/
 };
 
 static const uint8_t soft_key_default_connected[] = {
@@ -595,7 +595,7 @@ static const uint8_t soft_key_default_offhook[] = {
 	SOFTKEY_ENDCALL,
 	SOFTKEY_CFWDALL,
 	SOFTKEY_CFWDBUSY,
-	SOFTKEY_GPICKUP,
+	/*SOFTKEY_GPICKUP,*/
 };
 
 static const uint8_t soft_key_default_connwithtrans[] = {
@@ -825,11 +825,20 @@ static int callnums = 1;
 #define SKINNY_DEVICE_ATA186		12	/* Cisco ATA-186 */
 #define SKINNY_DEVICE_7941		115
 #define SKINNY_DEVICE_7971		119
+#define SKINNY_DEVICE_7914		124	/* Expansion module */
 #define SKINNY_DEVICE_7985		302
 #define SKINNY_DEVICE_7911		307
 #define SKINNY_DEVICE_7961GE		308
 #define SKINNY_DEVICE_7941GE		309
+#define SKINNY_DEVICE_7931		348
 #define SKINNY_DEVICE_7921		365
+#define SKINNY_DEVICE_7906		369
+#define SKINNY_DEVICE_7962		404	/* Not found */
+#define SKINNY_DEVICE_7937		431
+#define SKINNY_DEVICE_7942		434
+#define SKINNY_DEVICE_7945		435
+#define SKINNY_DEVICE_7965		436
+#define SKINNY_DEVICE_7975		437
 #define SKINNY_DEVICE_7905		20000
 #define SKINNY_DEVICE_7920		30002
 #define SKINNY_DEVICE_7970		30006
@@ -1028,6 +1037,7 @@ static struct skinny_device {
 	int lastlineinstance;
 	int lastcallreference;
 	int capability;
+	int earlyrtp;
 	char exten[AST_MAX_EXTENSION];
 	struct sockaddr_in addr;
 	struct in_addr ourip;
@@ -1142,12 +1152,16 @@ static void *get_button_template(struct skinnysession *s, struct button_definiti
 		case SKINNY_DEVICE_7960:
 		case SKINNY_DEVICE_7961:
 		case SKINNY_DEVICE_7961GE:
+		case SKINNY_DEVICE_7962:
+		case SKINNY_DEVICE_7965:
 			for (i = 0; i < 6; i++)
 				(btn++)->buttonDefinition = BT_CUST_LINESPEEDDIAL;
 			break;
 		case SKINNY_DEVICE_7940:
 		case SKINNY_DEVICE_7941:
 		case SKINNY_DEVICE_7941GE:
+		case SKINNY_DEVICE_7942:
+		case SKINNY_DEVICE_7945:
 			for (i = 0; i < 2; i++)
 				(btn++)->buttonDefinition = BT_CUST_LINESPEEDDIAL;
 			break;
@@ -1161,6 +1175,7 @@ static void *get_button_template(struct skinnysession *s, struct button_definiti
 			break;
 		case SKINNY_DEVICE_7970:
 		case SKINNY_DEVICE_7971:
+		case SKINNY_DEVICE_7975:
 		case SKINNY_DEVICE_CIPC:
 			for (i = 0; i < 8; i++)
 				(btn++)->buttonDefinition = BT_CUST_LINESPEEDDIAL;
@@ -1186,6 +1201,18 @@ static void *get_button_template(struct skinnysession *s, struct button_definiti
 			break;
 		case SKINNY_DEVICE_7902:
 			ast_log(LOG_WARNING, "Unsupported device type '%d (7902)' found.\n", d->type);
+			break;
+		case SKINNY_DEVICE_7906:
+			ast_log(LOG_WARNING, "Unsupported device type '%d (7906)' found.\n", d->type);
+			break;
+		case SKINNY_DEVICE_7931:
+			ast_log(LOG_WARNING, "Unsupported device type '%d (7931)' found.\n", d->type);
+			break;
+		case SKINNY_DEVICE_7937:
+			ast_log(LOG_WARNING, "Unsupported device type '%d (7937)' found.\n", d->type);
+			break;
+		case SKINNY_DEVICE_7914:
+			ast_log(LOG_WARNING, "Unsupported device type '%d (7914)' found.  Expansion module registered by itself?\n", d->type);
 			break;
 		case SKINNY_DEVICE_SCCPGATEWAY_AN:
 		case SKINNY_DEVICE_SCCPGATEWAY_BRI:
@@ -1449,6 +1476,7 @@ static int transmit_response(struct skinnysession *s, struct skinny_req *req)
 
 	if (letohl(req->len > SKINNY_MAX_PACKET) || letohl(req->len < 0)) {
 		ast_log(LOG_WARNING, "transmit_response: the length of the request is out of bounds\n");
+		ast_mutex_unlock(&s->lock);
 		return -1;
 	}
 
@@ -1937,6 +1965,8 @@ static char *device2str(int type)
 		return "7941";
 	case SKINNY_DEVICE_7971:
 		return "7971";
+	case SKINNY_DEVICE_7914:
+		return "7914";
 	case SKINNY_DEVICE_7985:
 		return "7985";
 	case SKINNY_DEVICE_7911:
@@ -1945,8 +1975,24 @@ static char *device2str(int type)
 		return "7961GE";
 	case SKINNY_DEVICE_7941GE:
 		return "7941GE";
+	case SKINNY_DEVICE_7931:
+		return "7931";
 	case SKINNY_DEVICE_7921:
 		return "7921";
+	case SKINNY_DEVICE_7906:
+		return "7906";
+	case SKINNY_DEVICE_7962:
+		return "7962";
+	case SKINNY_DEVICE_7937:
+		return "7937";
+	case SKINNY_DEVICE_7942:
+		return "7942";
+	case SKINNY_DEVICE_7945:
+		return "7945";
+	case SKINNY_DEVICE_7965:
+		return "7965";
+	case SKINNY_DEVICE_7975:
+		return "7975";
 	case SKINNY_DEVICE_7905:
 		return "7905";
 	case SKINNY_DEVICE_7920:
@@ -2100,6 +2146,7 @@ static struct skinny_device *build_device(const char *cat, struct ast_variable *
 		d->lastlineinstance = 1;
 		d->capability = default_capability;
 		d->prefs = default_prefs;
+		d->earlyrtp = 1;
 		while(v) {
 			if (!strcasecmp(v->name, "host")) {
 				if (ast_get_ip(&d->addr, v->value)) {
@@ -2120,6 +2167,8 @@ static struct skinny_device *build_device(const char *cat, struct ast_variable *
 				ast_parse_allow_disallow(&d->prefs, &d->capability, v->value, 0);
 			} else if (!strcasecmp(v->name, "version")) {
 				ast_copy_string(d->version_id, v->value, sizeof(d->version_id));
+			} else if (!strcasecmp(v->name, "earlyrtp")) {
+				d->earlyrtp = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "nat")) {
 				nat = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "callerid")) {
@@ -2154,6 +2203,10 @@ static struct skinny_device *build_device(const char *cat, struct ast_variable *
 				cancallforward = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "mailbox")) {
 				ast_copy_string(mailbox, v->value, sizeof(mailbox));
+			} else if (!strcasecmp(v->name, "hasvoicemail")) {
+				if (ast_true(v->value) && ast_strlen_zero(mailbox)) {
+					ast_copy_string(mailbox, cat, sizeof(mailbox));
+				}
 			} else if (!strcasecmp(v->name, "callreturn")) {
 				callreturn = ast_true(v->value);
 			} else if (!strcasecmp(v->name, "callwaiting")) {
@@ -2322,6 +2375,9 @@ static void *skinny_newcall(void *data)
 		l->hidecallerid ? "" : l->cid_name,
 		c->cid.cid_ani ? NULL : l->cid_num);
 	ast_setstate(c, AST_STATE_RING);
+	if (!sub->rtp) {
+		start_rtp(sub);
+	}
 	res = ast_pbx_run(c);
 	if (res) {
 		ast_log(LOG_WARNING, "PBX exited non-zero\n");
@@ -2746,45 +2802,61 @@ static int skinny_indicate(struct ast_channel *ast, int ind, const void *data, s
 	case AST_CONTROL_RINGING:
 		if (ast->_state != AST_STATE_UP) {
 			if (!sub->progress) {
-				transmit_tone(s, SKINNY_ALERT, l->instance, sub->callid);
+				if (!d->earlyrtp) {
+					transmit_tone(s, SKINNY_ALERT, l->instance, sub->callid);
+				}
 				transmit_callstate(s, l->instance, SKINNY_RINGOUT, sub->callid);
 				transmit_dialednumber(s, exten, l->instance, sub->callid);
 				transmit_displaypromptstatus(s, "Ring Out", 0, l->instance, sub->callid);
 				transmit_callinfo(s, ast->cid.cid_name, ast->cid.cid_num, exten, exten, l->instance, sub->callid, 2); /* 2 = outgoing from phone */
 				sub->ringing = 1;
-				break;
+				if (!d->earlyrtp) {
+					break;
+				}
 			}
 		}
-		return -1;
+		return -1; /* Tell asterisk to provide inband signalling */
 	case AST_CONTROL_BUSY:
 		if (ast->_state != AST_STATE_UP) {
-			transmit_tone(s, SKINNY_BUSYTONE, l->instance, sub->callid);
+			if (!d->earlyrtp) {
+				transmit_tone(s, SKINNY_BUSYTONE, l->instance, sub->callid);
+			}
 			transmit_callstate(s, l->instance, SKINNY_BUSY, sub->callid);
 			sub->alreadygone = 1;
 			ast_softhangup_nolock(ast, AST_SOFTHANGUP_DEV);
-			break;
+			if (!d->earlyrtp) {
+				break;
+			}
 		}
-		return -1;
+		return -1; /* Tell asterisk to provide inband signalling */
 	case AST_CONTROL_CONGESTION:
 		if (ast->_state != AST_STATE_UP) {
-			transmit_tone(s, SKINNY_REORDER, l->instance, sub->callid);
+			if (!d->earlyrtp) {
+				transmit_tone(s, SKINNY_REORDER, l->instance, sub->callid);
+			}
 			transmit_callstate(s, l->instance, SKINNY_CONGESTION, sub->callid);
 			sub->alreadygone = 1;
 			ast_softhangup_nolock(ast, AST_SOFTHANGUP_DEV);
-			break;
+			if (!d->earlyrtp) {
+				break;
+			}
 		}
-		return -1;
+		return -1; /* Tell asterisk to provide inband signalling */
 	case AST_CONTROL_PROGRESS:
 		if ((ast->_state != AST_STATE_UP) && !sub->progress && !sub->outgoing) {
-			transmit_tone(s, SKINNY_ALERT, l->instance, sub->callid);
+			if (!d->earlyrtp) {
+				transmit_tone(s, SKINNY_ALERT, l->instance, sub->callid);
+			}
 			transmit_callstate(s, l->instance, SKINNY_PROGRESS, sub->callid);
 			transmit_displaypromptstatus(s, "Call Progress", 0, l->instance, sub->callid);
 			transmit_callinfo(s, ast->cid.cid_name, ast->cid.cid_num, exten, exten, l->instance, sub->callid, 2); /* 2 = outgoing from phone */
 			sub->progress = 1;
-			break;
+			if (!d->earlyrtp) {
+				break;
+			}
 		}
-		return -1;
-	case -1:
+		return -1; /* Tell asterisk to provide inband signalling */
+	case -1:  /* STOP_TONE */
 		transmit_tone(s, SKINNY_SILENCE, l->instance, sub->callid);
 		break;
 	case AST_CONTROL_HOLD:
@@ -2800,7 +2872,7 @@ static int skinny_indicate(struct ast_channel *ast, int ind, const void *data, s
 		break;
 	default:
 		ast_log(LOG_WARNING, "Don't know how to indicate condition %d\n", ind);
-		return -1;
+		return -1; /* Tell asterisk to provide inband signalling */
 	}
 	return 0;
 }
@@ -3515,8 +3587,8 @@ static int handle_speed_dial_stat_req_message(struct skinny_req *req, struct ski
 		return -1;
 
 	req->data.speeddialreq.speedDialNumber = htolel(instance);
-	snprintf(req->data.speeddial.speedDialDirNumber, sizeof(req->data.speeddial.speedDialDirNumber), sd->exten);
-	snprintf(req->data.speeddial.speedDialDisplayName, sizeof(req->data.speeddial.speedDialDisplayName), sd->label);
+	ast_copy_string(req->data.speeddial.speedDialDirNumber, sd->exten, sizeof(req->data.speeddial.speedDialDirNumber));
+	ast_copy_string(req->data.speeddial.speedDialDisplayName, sd->label, sizeof(req->data.speeddial.speedDialDisplayName));
 
 	transmit_response(s, req);
 	return 1;
@@ -3692,7 +3764,7 @@ static int handle_version_req_message(struct skinny_req *req, struct skinnysessi
 	if (!(req = req_alloc(sizeof(struct version_res_message), VERSION_RES_MESSAGE)))
 		return -1;
 
-	snprintf(req->data.version.version, sizeof(req->data.version.version), d->version_id);
+	ast_copy_string(req->data.version.version, d->version_id, sizeof(req->data.version.version));
 	transmit_response(s, req);
 	return 1;
 }
@@ -4364,12 +4436,13 @@ static int get_input(struct skinnysession *s)
 {
 	int res;
 	int dlen = 0;
+	int *bufaddr;
 	struct pollfd fds[1];
 
  	fds[0].fd = s->fd;
 	fds[0].events = POLLIN;
 	fds[0].revents = 0;
-	res = poll(fds, 1, (keep_alive * 1100)); /* If nothing has happen, client is dead */
+	res = ast_poll(fds, 1, (keep_alive * 1100)); /* If nothing has happen, client is dead */
 						 /* we add 10% to the keep_alive to deal */
 						 /* with network delays, etc */
 	if (res < 0) {
@@ -4410,7 +4483,8 @@ static int get_input(struct skinnysession *s)
 			return -1;
 		}
 		
-		dlen = letohl(*(int *)s->inbuf);
+		bufaddr = (int *)s->inbuf;
+		dlen = letohl(*bufaddr);
 		if (dlen < 4) {
 			ast_log(LOG_WARNING, "Skinny Client sent invalid data.\n");
 			ast_mutex_unlock(&s->lock);
@@ -4419,7 +4493,7 @@ static int get_input(struct skinnysession *s)
 		if (dlen+8 > sizeof(s->inbuf)) {
 			dlen = sizeof(s->inbuf) - 8;
 		}
-		*(int *)s->inbuf = htolel(dlen);
+		*bufaddr = htolel(dlen);
 
 		res = read(s->fd, s->inbuf+4, dlen+4);
 		ast_mutex_unlock(&s->lock);
@@ -4438,13 +4512,15 @@ static int get_input(struct skinnysession *s)
 static struct skinny_req *skinny_req_parse(struct skinnysession *s)
 {
 	struct skinny_req *req;
+	int *bufaddr;
 
 	if (!(req = ast_calloc(1, SKINNY_MAX_PACKET)))
 		return NULL;
 
 	ast_mutex_lock(&s->lock);
 	memcpy(req, s->inbuf, skinny_header_size);
-	memcpy(&req->data, s->inbuf+skinny_header_size, letohl(*(int*)(s->inbuf))-4);
+	bufaddr = (int *)(s->inbuf);
+	memcpy(&req->data, s->inbuf+skinny_header_size, letohl(*bufaddr)-4);
 
 	ast_mutex_unlock(&s->lock);
 
@@ -4684,7 +4760,7 @@ static int reload_config(void)
 		} else if (!strcasecmp(v->name, "disallow")) {
 			ast_parse_allow_disallow(&default_prefs, &default_capability, v->value, 0);
 		} else if (!strcasecmp(v->name, "bindport") || !strcasecmp(v->name, "port")) {
-			if (sscanf(v->value, "%d", &ourport) == 1) {
+			if (sscanf(v->value, "%5d", &ourport) == 1) {
 				bindaddr.sin_port = htons(ourport);
 			} else {
 				ast_log(LOG_WARNING, "Invalid bindport '%s' at line %d of %s\n", v->value, v->lineno, config);
@@ -4746,6 +4822,7 @@ static int reload_config(void)
 		if(setsockopt(skinnysock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) == -1) {
 			ast_log(LOG_ERROR, "Set Socket Options failed: errno %d, %s\n", errno, strerror(errno));
 			ast_config_destroy(cfg);
+			ast_mutex_unlock(&netlock);
 			return 0;
 		}
 		if (skinnysock < 0) {
@@ -4758,6 +4835,7 @@ static int reload_config(void)
 				close(skinnysock);
 				skinnysock = -1;
 				ast_config_destroy(cfg);
+				ast_mutex_unlock(&netlock);
 				return 0;
 			}
 			if (listen(skinnysock,DEFAULT_SKINNY_BACKLOG)) {
@@ -4767,6 +4845,7 @@ static int reload_config(void)
 					close(skinnysock);
 					skinnysock = -1;
 					ast_config_destroy(cfg);
+					ast_mutex_unlock(&netlock);
 					return 0;
 			}
 			if (option_verbose > 1)

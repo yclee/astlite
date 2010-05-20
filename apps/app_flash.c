@@ -18,7 +18,7 @@
 
 /*! \file
  *
- * \brief App to flash a zap trunk
+ * \brief App to flash a DAHDI trunk
  *
  * \author Mark Spencer <markster@digium.com>
  * 
@@ -26,19 +26,18 @@
  */
  
 /*** MODULEINFO
-	<depend>zaptel</depend>
+	<depend>dahdi</depend>
  ***/
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 82992 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 182652 $")
 
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/ioctl.h>
-#include <zaptel/zaptel.h>
 
 #include "asterisk/lock.h"
 #include "asterisk/file.h"
@@ -50,24 +49,33 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 82992 $")
 #include "asterisk/image.h"
 #include "asterisk/options.h"
 
+#include "asterisk/dahdi_compat.h"
+
 static char *app = "Flash";
 
-static char *synopsis = "Flashes a Zap Trunk";
+static char *dahdi_synopsis = "Flashes a DAHDI trunk";
 
-static char *descrip = 
-"Performs a flash on a zap trunk.  This can be used\n"
+static char *dahdi_descrip = 
+"Performs a flash on a DAHDI trunk.  This can be used\n"
 "to access features provided on an incoming analogue circuit\n"
 "such as conference and call waiting. Use with SendDTMF() to\n"
 "perform external transfers\n";
 
+static char *zap_synopsis = "Flashes a Zap trunk";
+
+static char *zap_descrip = 
+"Performs a flash on a Zap trunk.  This can be used\n"
+"to access features provided on an incoming analogue circuit\n"
+"such as conference and call waiting. Use with SendDTMF() to\n"
+"perform external transfers\n";
 
 static inline int zt_wait_event(int fd)
 {
 	/* Avoid the silly zt_waitevent which ignores a bunch of events */
 	int i,j=0;
-	i = ZT_IOMUX_SIGEVENT;
-	if (ioctl(fd, ZT_IOMUX, &i) == -1) return -1;
-	if (ioctl(fd, ZT_GETEVENT, &j) == -1) return -1;
+	i = DAHDI_IOMUX_SIGEVENT;
+	if (ioctl(fd, DAHDI_IOMUX, &i) == -1) return -1;
+	if (ioctl(fd, DAHDI_GETEVENT, &j) == -1) return -1;
 	return j;
 }
 
@@ -76,15 +84,15 @@ static int flash_exec(struct ast_channel *chan, void *data)
 	int res = -1;
 	int x;
 	struct ast_module_user *u;
-	struct zt_params ztp;
+	struct dahdi_params ztp;
 	u = ast_module_user_add(chan);
-	if (!strcasecmp(chan->tech->type, "Zap")) {
+	if (!strcasecmp(chan->tech->type, dahdi_chan_name)) {
 		memset(&ztp, 0, sizeof(ztp));
-		res = ioctl(chan->fds[0], ZT_GET_PARAMS, &ztp);
+		res = ioctl(chan->fds[0], DAHDI_GET_PARAMS, &ztp);
 		if (!res) {
-			if (ztp.sigtype & __ZT_SIG_FXS) {
-				x = ZT_FLASH;
-				res = ioctl(chan->fds[0], ZT_HOOK, &x);
+			if (ztp.sigtype & __DAHDI_SIG_FXS) {
+				x = DAHDI_FLASH;
+				res = ioctl(chan->fds[0], DAHDI_HOOK, &x);
 				if (!res || (errno == EINPROGRESS)) {
 					if (res) {
 						/* Wait for the event to finish */
@@ -100,7 +108,7 @@ static int flash_exec(struct ast_channel *chan, void *data)
 		} else
 			ast_log(LOG_WARNING, "Unable to get parameters of %s: %s\n", chan->name, strerror(errno));
 	} else
-		ast_log(LOG_WARNING, "%s is not a Zap channel\n", chan->name);
+		ast_log(LOG_WARNING, "%s is not a DAHDI channel\n", chan->name);
 	ast_module_user_remove(u);
 	return res;
 }
@@ -118,8 +126,11 @@ static int unload_module(void)
 
 static int load_module(void)
 {
-	return ast_register_application(app, flash_exec, synopsis, descrip);
+	if (*dahdi_chan_mode == CHAN_ZAP_MODE) {
+		return ast_register_application(app, flash_exec, zap_synopsis, zap_descrip);
+	} else {
+		return ast_register_application(app, flash_exec, dahdi_synopsis, dahdi_descrip);
+	}
 }
 
 AST_MODULE_INFO_STANDARD(ASTERISK_GPL_KEY, "Flash channel application");
-

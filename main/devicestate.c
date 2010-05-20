@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 96644 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 205409 $")
 
 #include <sys/types.h>
 #include <unistd.h>
@@ -45,15 +45,15 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 96644 $")
 
 /*! \brief Device state strings for printing */
 static const char *devstatestring[] = {
-	/* 0 AST_DEVICE_UNKNOWN */	"Unknown",	/*!< Valid, but unknown state */
-	/* 1 AST_DEVICE_NOT_INUSE */	"Not in use",	/*!< Not used */
-	/* 2 AST_DEVICE IN USE */	"In use",	/*!< In use */
-	/* 3 AST_DEVICE_BUSY */		"Busy",		/*!< Busy */
-	/* 4 AST_DEVICE_INVALID */	"Invalid",	/*!< Invalid - not known to Asterisk */
-	/* 5 AST_DEVICE_UNAVAILABLE */	"Unavailable",	/*!< Unavailable (not registred) */
-	/* 6 AST_DEVICE_RINGING */	"Ringing",	/*!< Ring, ring, ring */
-	/* 7 AST_DEVICE_RINGINUSE */	"Ring+Inuse",	/*!< Ring and in use */
-	/* 8 AST_DEVICE_ONHOLD */	"On Hold"	/*!< On Hold */
+	/* 0 AST_DEVICE_UNKNOWN */    "Unknown",    /*!< Valid, but unknown state */
+	/* 1 AST_DEVICE_NOT_INUSE */  "Not in use", /*!< Not used */
+	/* 2 AST_DEVICE IN USE */     "In use",     /*!< In use */
+	/* 3 AST_DEVICE_BUSY */	      "Busy",       /*!< Busy */
+	/* 4 AST_DEVICE_INVALID */    "Invalid",    /*!< Invalid - not known to Asterisk */
+	/* 5 AST_DEVICE_UNAVAILABLE */"Unavailable",/*!< Unavailable (not registered) */
+	/* 6 AST_DEVICE_RINGING */    "Ringing",    /*!< Ring, ring, ring */
+	/* 7 AST_DEVICE_RINGINUSE */  "Ring+Inuse", /*!< Ring and in use */
+	/* 8 AST_DEVICE_ONHOLD */     "On Hold"     /*!< On Hold */
 };
 
 /*! \brief  A device state provider (not a channel) */
@@ -95,7 +95,7 @@ static ast_cond_t change_pending;
 static int getproviderstate(const char *provider, const char *address);
 
 /*! \brief Find devicestate as text message for output */
-const char *devstate2str(int devstate) 
+const char *devstate2str(enum ast_device_state devstate) 
 {
 	return devstatestring[devstate];
 }
@@ -294,17 +294,13 @@ static void do_state_change(const char *device)
 	ast_hint_state_changed(device);
 }
 
-static int __ast_device_state_changed_literal(char *buf, int norecurse)
+int ast_device_state_changed_literal(const char *device)
 {
-	char *device;
 	struct state_change *change;
-	char *tmp = NULL;
 
 	if (option_debug > 2)
-		ast_log(LOG_DEBUG, "Notification of state change to be queued on device/channel %s\n", buf);
+		ast_log(LOG_DEBUG, "Notification of state change to be queued on device/channel %s\n", device);
 
-	device = buf;
-	
 	if (change_thread == AST_PTHREADT_NULL || !(change = ast_calloc(1, sizeof(*change) + strlen(device)))) {
 		/* we could not allocate a change struct, or */
 		/* there is no background thread, so process the change now */
@@ -320,26 +316,7 @@ static int __ast_device_state_changed_literal(char *buf, int norecurse)
 		AST_LIST_UNLOCK(&state_changes);
 	}
 
-	/* The problem with this API is that a device may be called with the unique
-	 * identifier appended or not, but it's separated from the channel name
-	 * with a '-', which is also a legitimate character in a channel name.  So,
-	 * we have to force both names to get their names checked for state changes
-	 * to ensure that the right one gets notified.  Not a huge performance hit,
-	 * but it might could be fixed by an enterprising programmer in trunk.
-	 */
-	if (!norecurse && (tmp = strrchr(device, '-'))) {
-		*tmp = '\0';
-		__ast_device_state_changed_literal(device, 1);
-	}
-	
 	return 1;
-}
-
-int ast_device_state_changed_literal(const char *dev)
-{
-	char *buf;
-	buf = ast_strdupa(dev);
-	return __ast_device_state_changed_literal(buf, 0);
 }
 
 /*! \brief Accept change notification, add it to change queue */
@@ -351,7 +328,7 @@ int ast_device_state_changed(const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
-	return __ast_device_state_changed_literal(buf, 0);
+	return ast_device_state_changed_literal(buf);
 }
 
 /*! \brief Go through the dev state change queue and update changes in the dev state thread */
@@ -389,4 +366,92 @@ int ast_device_state_engine_init(void)
 	}
 
 	return 0;
+}
+
+void ast_devstate_aggregate_init(struct ast_devstate_aggregate *agg)
+{
+	memset(agg, 0, sizeof(*agg));
+	agg->all_unknown = 1;
+	agg->all_unavail = 1;
+	agg->all_busy = 1;
+	agg->all_free = 1;
+}
+
+void ast_devstate_aggregate_add(struct ast_devstate_aggregate *agg, enum ast_device_state state)
+{
+	switch (state) {
+	case AST_DEVICE_NOT_INUSE:
+		agg->all_unknown = 0;
+		agg->all_unavail = 0;
+		agg->all_busy = 0;
+		break;
+	case AST_DEVICE_INUSE:
+		agg->in_use = 1;
+		agg->all_unavail = 0;
+		agg->all_free = 0;
+		agg->all_unknown = 0;
+		break;
+	case AST_DEVICE_RINGING:
+		agg->ring = 1;
+		agg->all_unavail = 0;
+		agg->all_free = 0;
+		agg->all_unknown = 0;
+		break;
+	case AST_DEVICE_RINGINUSE:
+		agg->in_use = 1;
+		agg->ring = 1;
+		agg->all_unavail = 0;
+		agg->all_free = 0;
+		agg->all_unknown = 0;
+		break;
+	case AST_DEVICE_ONHOLD:
+		agg->all_unknown = 0;
+		agg->all_unavail = 0;
+		agg->all_free = 0;
+		agg->on_hold = 1;
+		break;
+	case AST_DEVICE_BUSY:
+		agg->all_unknown = 0;
+		agg->all_unavail = 0;
+		agg->all_free = 0;
+		agg->busy = 1;
+		agg->in_use = 1;
+		break;
+	case AST_DEVICE_UNAVAILABLE:
+		agg->all_unknown = 0;
+	case AST_DEVICE_INVALID:
+		agg->all_busy = 0;
+		agg->all_free = 0;
+		break;
+	case AST_DEVICE_UNKNOWN:
+		agg->all_busy = 0;
+		agg->all_free = 0;
+		break;
+	case AST_DEVICE_TOTAL: /* not a device state, included for completeness. */
+		break;
+	}
+}
+
+enum ast_device_state ast_devstate_aggregate_result(struct ast_devstate_aggregate *agg)
+{
+	if (agg->all_free)
+		return AST_DEVICE_NOT_INUSE;
+	if ((agg->in_use || agg->on_hold) && agg->ring)
+		return AST_DEVICE_RINGINUSE;
+	if (agg->ring)
+		return AST_DEVICE_RINGING;
+	if (agg->busy)
+		return AST_DEVICE_BUSY;
+	if (agg->in_use)
+		return AST_DEVICE_INUSE;
+	if (agg->on_hold)
+		return AST_DEVICE_ONHOLD;
+	if (agg->all_busy)
+		return AST_DEVICE_BUSY;
+	if (agg->all_unknown)
+		return AST_DEVICE_UNKNOWN;
+	if (agg->all_unavail)
+		return AST_DEVICE_UNAVAILABLE;
+
+	return AST_DEVICE_NOT_INUSE;
 }

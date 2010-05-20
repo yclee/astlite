@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 83432 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 142354 $")
 
 #ifdef DEBUG_SCHEDULER
 #define DEBUG(a) do { \
@@ -201,7 +201,6 @@ static int sched_settime(struct timeval *tv, int when)
 		*tv = now;
 	*tv = ast_tvadd(*tv, ast_samp2tv(when, 1000));
 	if (ast_tvcmp(*tv, now) < 0) {
-		ast_log(LOG_DEBUG, "Request to schedule in the past?!?!\n");
 		*tv = now;
 	}
 	return 0;
@@ -215,11 +214,9 @@ int ast_sched_add_variable(struct sched_context *con, int when, ast_sched_cb cal
 {
 	struct sched *tmp;
 	int res = -1;
+
 	DEBUG(ast_log(LOG_DEBUG, "ast_sched_add()\n"));
-	if (!when) {
-		ast_log(LOG_NOTICE, "Scheduled event in 0 ms?\n");
-		return -1;
-	}
+
 	ast_mutex_lock(&con->lock);
 	if ((tmp = sched_alloc(con))) {
 		tmp->id = con->eventcnt++;
@@ -241,6 +238,7 @@ int ast_sched_add_variable(struct sched_context *con, int when, ast_sched_cb cal
 		ast_sched_dump(con);
 #endif
 	ast_mutex_unlock(&con->lock);
+
 	return res;
 }
 
@@ -255,7 +253,11 @@ int ast_sched_add(struct sched_context *con, int when, ast_sched_cb callback, co
  * would be two or more in the list with that
  * id.
  */
+#ifndef AST_DEVMODE
 int ast_sched_del(struct sched_context *con, int id)
+#else
+int _ast_sched_del(struct sched_context *con, int id, const char *file, int line, const char *function)
+#endif
 {
 	struct sched *s;
 
@@ -282,8 +284,10 @@ int ast_sched_del(struct sched_context *con, int id)
 	if (!s) {
 		if (option_debug)
 			ast_log(LOG_DEBUG, "Attempted to delete nonexistent schedule entry %d!\n", id);
-#ifdef DO_CRASH
-		CRASH;
+#ifndef AST_DEVMODE
+		ast_assert(s != NULL);
+#else
+		_ast_assert(0, "s != NULL", file, line, function);
 #endif
 		return -1;
 	}

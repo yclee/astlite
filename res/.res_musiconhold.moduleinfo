@@ -1,4 +1,5 @@
 <member name="res_musiconhold" displayname="Music On Hold Resource" remove_on_change="res/res_musiconhold.o res/res_musiconhold.so">
 	<conflict>win32</conflict>
-	<use>zaptel</use>
+	<use>dahdi</use>
+	<depend>working_fork</depend>
 </member>

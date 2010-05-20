@@ -31,7 +31,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 81435 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 159808 $")
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -148,7 +148,7 @@ struct dn_answer {
 	unsigned short class;
 	unsigned int ttl;
 	unsigned short size;
-} __attribute__ ((__packed__));
+} __attribute__((__packed__));
 
 static int skip_name(unsigned char *s, int len)
 {
@@ -255,6 +255,7 @@ int ast_search_dns(void *context,
 	int res, ret = -1;
 
 #ifdef HAVE_RES_NINIT
+	memset(&dnsstate, 0, sizeof(dnsstate));
 	res_ninit(&dnsstate);
 	res = res_nsearch(&dnsstate, dname, class, type, answer, sizeof(answer));
 #else

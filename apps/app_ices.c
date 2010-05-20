@@ -25,9 +25,13 @@
  * \ingroup applications
  */
  
+/*** MODULEINFO
+	<depend>working_fork</depend>
+ ***/
+
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 48375 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 172438 $")
 
 #include <string.h>
 #include <stdio.h>
@@ -37,6 +41,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 48375 $")
 #include <fcntl.h>
 #include <sys/time.h>
 #include <errno.h>
+#ifdef HAVE_CAP
+#include <sys/capability.h>
+#endif /* HAVE_CAP */
 
 #include "asterisk/lock.h"
 #include "asterisk/file.h"
@@ -48,8 +55,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 48375 $")
 #include "asterisk/translate.h"
 #include "asterisk/options.h"
 
-#define ICES "/usr/bin/ices"
-#define LOCAL_ICES "/usr/local/bin/ices"
+#define path_BIN "/usr/bin/"
+#define path_LOCAL "/usr/local/bin/"
 
 static char *app = "ICES";
 
@@ -58,14 +65,16 @@ static char *synopsis = "Encode and stream using 'ices'";
 static char *descrip = 
 "  ICES(config.xml) Streams to an icecast server using ices\n"
 "(available separately).  A configuration file must be supplied\n"
-"for ices (see examples/asterisk-ices.conf). \n";
-
+"for ices (see contrib/asterisk-ices.xml). \n";
 
 static int icesencode(char *filename, int fd)
 {
 	int res;
 	int x;
 	sigset_t fullset, oldset;
+#ifdef HAVE_CAP
+	cap_t cap;
+#endif
 
 	sigfillset(&fullset);
 	pthread_sigmask(SIG_BLOCK, &fullset, &oldset);
@@ -82,6 +91,16 @@ static int icesencode(char *filename, int fd)
 	signal(SIGPIPE, SIG_DFL);
 	pthread_sigmask(SIG_UNBLOCK, &fullset, NULL);
 
+#ifdef HAVE_CAP
+	cap = cap_from_text("cap_net_admin-eip");
+
+	if (cap_set_proc(cap)) {
+		/* Careful with order! Logging cannot happen after we close FDs */
+		ast_log(LOG_WARNING, "Unable to remove capabilities.\n");
+	}
+	cap_free(cap);
+#endif
+
 	if (ast_opt_high_priority)
 		ast_set_priority(0);
 	dup2(fd, STDIN_FILENO);
@@ -89,13 +108,24 @@ static int icesencode(char *filename, int fd)
 		if ((x != STDIN_FILENO) && (x != STDOUT_FILENO))
 			close(x);
 	}
-	/* Most commonly installed in /usr/local/bin */
-	execl(ICES, "ices", filename, (char *)NULL);
-	/* But many places has it in /usr/bin */
-	execl(LOCAL_ICES, "ices", filename, (char *)NULL);
-	/* As a last-ditch effort, try to use PATH */
+
+	/* Most commonly installed in /usr/local/bin 
+	 * But many places has it in /usr/bin 
+	 * As a last-ditch effort, try to use PATH
+	 */
+	execl(path_LOCAL "ices2", "ices", filename, (char *)NULL);
+	execl(path_BIN "ices2", "ices", filename, (char *)NULL);
+	execlp("ices2", "ices", filename, (char *)NULL);
+
+	if (option_debug)
+		ast_log(LOG_DEBUG, "Couldn't find ices version 2, attempting to use ices version 1.");
+
+	execl(path_LOCAL "ices", "ices", filename, (char *)NULL);
+	execl(path_BIN "ices", "ices", filename, (char *)NULL);
 	execlp("ices", "ices", filename, (char *)NULL);
-	ast_log(LOG_WARNING, "Execute of ices failed\n");
+
+	ast_log(LOG_WARNING, "Execute of ices failed, could not be found.\n");
+	close(fd);
 	_exit(0);
 }
 
@@ -161,7 +191,6 @@ static int ices_exec(struct ast_channel *chan, void *data)
 	if (c)
 		*c = '\0';	
 	res = icesencode(filename, fds[0]);
-	close(fds[0]);
 	if (res >= 0) {
 		pid = res;
 		for (;;) {
@@ -192,6 +221,7 @@ static int ices_exec(struct ast_channel *chan, void *data)
 			ast_frfree(f);
 		}
 	}
+	close(fds[0]);
 	close(fds[1]);
 	
 	if (pid > -1)

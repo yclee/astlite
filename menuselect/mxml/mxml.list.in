@@ -25,6 +25,7 @@ $includedir=@includedir@
 $libdir=@libdir@
 $mandir=@mandir@
 $srcdir=@srcdir@
+$datarootdir=@datarootdir@
 
 $PICFLAG=@PICFLAG@
 

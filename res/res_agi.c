@@ -23,9 +23,13 @@
  * \author Mark Spencer <markster@digium.com> 
  */
 
+/*** MODULEINFO
+	<depend>working_fork</depend>
+ ***/
+
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98317 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 237405 $")
 
 #include <sys/types.h>
 #include <netdb.h>
@@ -44,6 +48,9 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98317 $")
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/wait.h>
+#ifdef HAVE_CAP
+#include <sys/capability.h>
+#endif /* HAVE_CAP */
 
 #include "asterisk/file.h"
 #include "asterisk/logger.h"
@@ -64,6 +71,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98317 $")
 #include "asterisk/lock.h"
 #include "asterisk/strings.h"
 #include "asterisk/agi.h"
+#include "asterisk/features.h"
 
 #define MAX_ARGS 128
 #define MAX_COMMANDS 128
@@ -104,6 +112,8 @@ static char *descrip =
 
 static int agidebug = 0;
 
+static pthread_t shaun_of_the_dead_thread = AST_PTHREADT_NULL;
+
 #define TONE_BLOCK_SIZE 200
 
 /* Max time to connect to an AGI remote host */
@@ -112,13 +122,20 @@ static int agidebug = 0;
 #define AGI_PORT 4573
 
 enum agi_result {
+	AGI_RESULT_FAILURE = -1,
 	AGI_RESULT_SUCCESS,
 	AGI_RESULT_SUCCESS_FAST,
-	AGI_RESULT_FAILURE,
 	AGI_RESULT_HANGUP
 };
 
-static int agi_debug_cli(int fd, char *fmt, ...)
+struct zombie {
+	pid_t pid;
+	AST_LIST_ENTRY(zombie) list;
+};
+
+static AST_LIST_HEAD_STATIC(zombies, zombie);
+
+static int __attribute__((format(printf, 2, 3))) agi_debug_cli(int fd, char *fmt, ...)
 {
 	char *stuff;
 	int res = 0;
@@ -204,7 +221,7 @@ static enum agi_result launch_netscript(char *agiurl, char *argv[], int *fds, in
 
 	pfds[0].fd = s;
 	pfds[0].events = POLLOUT;
-	while ((res = poll(pfds, 1, MAX_AGI_CONNECT)) != 1) {
+	while ((res = ast_poll(pfds, 1, MAX_AGI_CONNECT)) != 1) {
 		if (errno != EINTR) {
 			if (!res) {
 				ast_log(LOG_WARNING, "FastAGI connection to '%s' timed out after MAX_AGI_CONNECT (%d) milliseconds.\n",
@@ -298,6 +315,16 @@ static enum agi_result launch_script(char *script, char *argv[], int *fds, int *
 		return AGI_RESULT_FAILURE;
 	}
 	if (!pid) {
+#ifdef HAVE_CAP
+		cap_t cap = cap_from_text("cap_net_admin-eip");
+
+		if (cap_set_proc(cap)) {
+			/* Careful with order! Logging cannot happen after we close FDs */
+			ast_log(LOG_WARNING, "Unable to remove capabilities.\n");
+		}
+		cap_free(cap);
+#endif
+
 		/* Pass paths to AGI via environmental variables */
 		setenv("AST_CONFIG_DIR", ast_config_AST_CONFIG_DIR, 1);
 		setenv("AST_CONFIG_FILE", ast_config_AST_CONFIG_FILE, 1);
@@ -346,6 +373,8 @@ static enum agi_result launch_script(char *script, char *argv[], int *fds, int *
 		execv(script, argv);
 		/* Can't use ast_log since FD's are closed */
 		fprintf(stdout, "verbose \"Failed to execute '%s': %s\" 2\n", script, strerror(errno));
+		/* Special case to set status of AGI to failure */
+		fprintf(stdout, "failure\n");
 		fflush(stdout);
 		_exit(1);
 	}
@@ -419,7 +448,7 @@ static int handle_waitfordigit(struct ast_channel *chan, AGI *agi, int argc, cha
 	int to;
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[3], "%d", &to) != 1)
+	if (sscanf(argv[3], "%30d", &to) != 1)
 		return RESULT_SHOWUSAGE;
 	res = ast_waitfordigit_full(chan, to, agi->audio, agi->ctrl);
 	fdprintf(agi->fd, "200 result=%d\n", res);
@@ -529,7 +558,7 @@ static int handle_controlstreamfile(struct ast_channel *chan, AGI *agi, int argc
 	else
 		stop = NULL;
 	
-	if ((argc > 5) && (sscanf(argv[5], "%d", &skipms) != 1))
+	if ((argc > 5) && (sscanf(argv[5], "%30d", &skipms) != 1))
 		return RESULT_SHOWUSAGE;
 
 	if (argc > 6 && !ast_strlen_zero(argv[6]))
@@ -570,7 +599,7 @@ static int handle_streamfile(struct ast_channel *chan, AGI *agi, int argc, char 
 	if (argv[3]) 
 		edigits = argv[3];
 
-	if ((argc > 4) && (sscanf(argv[4], "%ld", &sample_offset) != 1))
+	if ((argc > 4) && (sscanf(argv[4], "%30ld", &sample_offset) != 1))
 		return RESULT_SHOWUSAGE;
 	
 	fs = ast_openstream(chan, argv[2], chan->language);	
@@ -691,7 +720,7 @@ static int handle_saynumber(struct ast_channel *chan, AGI *agi, int argc, char *
 	int num;
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[2], "%d", &num) != 1)
+	if (sscanf(argv[2], "%30d", &num) != 1)
 		return RESULT_SHOWUSAGE;
 	res = ast_say_number_full(chan, num, argv[3], chan->language, (char *) NULL, agi->audio, agi->ctrl);
 	if (res == 1)
@@ -707,7 +736,7 @@ static int handle_saydigits(struct ast_channel *chan, AGI *agi, int argc, char *
 
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[2], "%d", &num) != 1)
+	if (sscanf(argv[2], "%30d", &num) != 1)
 		return RESULT_SHOWUSAGE;
 
 	res = ast_say_digit_str_full(chan, argv[2], argv[3], chan->language, agi->audio, agi->ctrl);
@@ -737,7 +766,7 @@ static int handle_saydate(struct ast_channel *chan, AGI *agi, int argc, char *ar
 	int num;
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[2], "%d", &num) != 1)
+	if (sscanf(argv[2], "%30d", &num) != 1)
 		return RESULT_SHOWUSAGE;
 	res = ast_say_date(chan, num, argv[3], chan->language);
 	if (res == 1)
@@ -752,7 +781,7 @@ static int handle_saytime(struct ast_channel *chan, AGI *agi, int argc, char *ar
 	int num;
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[2], "%d", &num) != 1)
+	if (sscanf(argv[2], "%30d", &num) != 1)
 		return RESULT_SHOWUSAGE;
 	res = ast_say_time(chan, num, argv[3], chan->language);
 	if (res == 1)
@@ -863,7 +892,7 @@ static int handle_setpriority(struct ast_channel *chan, AGI *agi, int argc, char
 	if (argc != 3)
 		return RESULT_SHOWUSAGE;	
 
-	if (sscanf(argv[2], "%d", &pri) != 1) {
+	if (sscanf(argv[2], "%30d", &pri) != 1) {
 		if ((pri = ast_findlabel_extension(chan, chan->context, chan->exten, argv[2], chan->cid.cid_num)) < 1)
 			return RESULT_SHOWUSAGE;
 	}
@@ -895,7 +924,7 @@ static int handle_recordfile(struct ast_channel *chan, AGI *agi, int argc, char 
 
 	if (argc < 6)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[5], "%d", &ms) != 1)
+	if (sscanf(argv[5], "%30d", &ms) != 1)
 		return RESULT_SHOWUSAGE;
 
 	if (argc > 6)
@@ -936,7 +965,7 @@ static int handle_recordfile(struct ast_channel *chan, AGI *agi, int argc, char 
 	/* backward compatibility, if no offset given, arg[6] would have been
 	 * caught below and taken to be a beep, else if it is a digit then it is a
 	 * offset */
-	if ((argc >6) && (sscanf(argv[6], "%ld", &sample_offset) != 1) && (!strchr(argv[6], '=')))
+	if ((argc >6) && (sscanf(argv[6], "%30ld", &sample_offset) != 1) && (!strchr(argv[6], '=')))
 		res = ast_streamfile(chan, "beep", chan->language);
 
 	if ((argc > 7) && (!strchr(argv[7], '=')))
@@ -967,7 +996,7 @@ static int handle_recordfile(struct ast_channel *chan, AGI *agi, int argc, char 
 		
 		start = ast_tvnow();
 		while ((ms < 0) || ast_tvdiff_ms(ast_tvnow(), start) < ms) {
-			res = ast_waitfor(chan, -1);
+			res = ast_waitfor(chan, ms - ast_tvdiff_ms(ast_tvnow(), start));
 			if (res < 0) {
 				ast_closestream(fs);
 				fdprintf(agi->fd, "200 result=%d (waitfor) endpos=%ld\n", res,sample_offset);
@@ -1056,7 +1085,7 @@ static int handle_autohangup(struct ast_channel *chan, AGI *agi, int argc, char 
 
 	if (argc != 3)
 		return RESULT_SHOWUSAGE;
-	if (sscanf(argv[2], "%d", &timeout) != 1)
+	if (sscanf(argv[2], "%30d", &timeout) != 1)
 		return RESULT_SHOWUSAGE;
 	if (timeout < 0)
 		timeout = 0;
@@ -1096,7 +1125,7 @@ static int handle_hangup(struct ast_channel *chan, AGI *agi, int argc, char **ar
 
 static int handle_exec(struct ast_channel *chan, AGI *agi, int argc, char **argv)
 {
-	int res;
+	int res, workaround;
 	struct ast_app *app;
 
 	if (argc < 2)
@@ -1108,7 +1137,16 @@ static int handle_exec(struct ast_channel *chan, AGI *agi, int argc, char **argv
 	app = pbx_findapp(argv[1]);
 
 	if (app) {
-		res = pbx_exec(chan, app, argv[2]);
+		if(!strcasecmp(argv[1], PARK_APP_NAME)) {
+			ast_masq_park_call(chan, NULL, 0, NULL);
+		}
+		if (!(workaround = ast_test_flag(chan, AST_FLAG_DISABLE_WORKAROUNDS))) {
+			ast_set_flag(chan, AST_FLAG_DISABLE_WORKAROUNDS);
+		}
+		res = pbx_exec(chan, app, argc == 2 ? "" : argv[2]);
+		if (!workaround) {
+			ast_clear_flag(chan, AST_FLAG_DISABLE_WORKAROUNDS);
+		}
 	} else {
 		ast_log(LOG_WARNING, "Could not find application (%s)\n", argv[1]);
 		res = -2;
@@ -1227,7 +1265,7 @@ static int handle_verbose(struct ast_channel *chan, AGI *agi, int argc, char **a
 		return RESULT_SHOWUSAGE;
 
 	if (argv[2])
-		sscanf(argv[2], "%d", &level);
+		sscanf(argv[2], "%30d", &level);
 
 	switch (level) {
 		case 4:
@@ -1256,16 +1294,35 @@ static int handle_verbose(struct ast_channel *chan, AGI *agi, int argc, char **a
 static int handle_dbget(struct ast_channel *chan, AGI *agi, int argc, char **argv)
 {
 	int res;
-	char tmp[256];
+	size_t bufsize = 16;
+	char *buf, *tmp;
 
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
-	res = ast_db_get(argv[2], argv[3], tmp, sizeof(tmp));
+
+	if (!(buf = ast_malloc(bufsize))) {
+		fdprintf(agi->fd, "200 result=-1\n");
+		return RESULT_SUCCESS;
+	}
+
+	do {
+		res = ast_db_get(argv[2], argv[3], buf, bufsize);
+		if (strlen(buf) < bufsize - 1) {
+			break;
+		}
+		bufsize *= 2;
+		if (!(tmp = ast_realloc(buf, bufsize))) {
+			break;
+		}
+		buf = tmp;
+	} while (1);
+	
 	if (res) 
 		fdprintf(agi->fd, "200 result=0\n");
 	else
-		fdprintf(agi->fd, "200 result=1 (%s)\n", tmp);
+		fdprintf(agi->fd, "200 result=1 (%s)\n", buf);
 
+	ast_free(buf);
 	return RESULT_SUCCESS;
 }
 
@@ -1348,6 +1405,9 @@ static int handle_noop(struct ast_channel *chan, AGI *agi, int arg, char *argv[]
 
 static int handle_setmusic(struct ast_channel *chan, AGI *agi, int argc, char *argv[])
 {
+	if (argc < 3) {
+		return RESULT_SHOWUSAGE;
+	}
 	if (!strncasecmp(argv[2], "on", 2))
 		ast_moh_start(chan, argc > 3 ? argv[3] : NULL, NULL);
 	else if (!strncasecmp(argv[2], "off", 3))
@@ -1805,11 +1865,16 @@ static int agi_handle_command(struct ast_channel *chan, AGI *agi, char *buf)
 	parse_args(buf, &argc, argv);
 	c = find_command(argv, 0);
 	if (c) {
+		/* If the AGI command being executed is an actual application (using agi exec)
+		the app field will be updated in pbx_exec via handle_exec */
+		if (chan->cdr && !ast_check_hangup(chan) && strcasecmp(argv[0], "EXEC"))
+			ast_cdr_setapp(chan->cdr, "AGI", buf);
+
 		res = c->handler(chan, agi, argc, argv);
 		switch(res) {
 		case RESULT_SHOWUSAGE:
 			fdprintf(agi->fd, "520-Invalid command syntax.  Proper usage follows:\n");
-			fdprintf(agi->fd, c->usage);
+			fdprintf(agi->fd, "%s", c->usage);
 			fdprintf(agi->fd, "520 End of proper usage.\n");
 			break;
 		case AST_PBX_KEEPALIVE:
@@ -1864,7 +1929,8 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 				/* If it's voice, write it to the audio pipe */
 				if ((agi->audio > -1) && (f->frametype == AST_FRAME_VOICE)) {
 					/* Write, ignoring errors */
-					write(agi->audio, f->data, f->datalen);
+					if (write(agi->audio, f->data, f->datalen) < 0) {
+					}
 				}
 				ast_frfree(f);
 			}
@@ -1904,6 +1970,12 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 				break;
 			}
 
+			/* Special case for inability to execute child process */
+			if (*buf && strncasecmp(buf, "failure", 7) == 0) {
+				returnstatus = AGI_RESULT_FAILURE;
+				break;
+			}
+
 			/* get rid of trailing newline, if any */
 			if (*buf && buf[strlen(buf) - 1] == '\n')
 				buf[strlen(buf) - 1] = 0;
@@ -1926,8 +1998,31 @@ static enum agi_result run_agi(struct ast_channel *chan, char *request, AGI *agi
 	if (pid > -1) {
 		const char *sighup = pbx_builtin_getvar_helper(chan, "AGISIGHUP");
 		if (ast_strlen_zero(sighup) || !ast_false(sighup)) {
-			if (kill(pid, SIGHUP))
+			if (kill(pid, SIGHUP)) {
 				ast_log(LOG_WARNING, "unable to send SIGHUP to AGI process %d: %s\n", pid, strerror(errno));
+			} else { /* Give the process a chance to die */
+				usleep(1);
+			}
+		}
+		/* This is essentially doing the same as without WNOHANG, except that
+		 * it allows the main thread to proceed, even without the child PID
+		 * dying immediately (the child may be doing cleanup, etc.).  Without
+		 * this code, zombie processes accumulate for as long as child
+		 * processes exist (which on busy systems may be always, filling up the
+		 * process table).
+		 *
+		 * Note that in trunk, we don't stop interaction at the hangup event
+		 * (instead we transparently switch to DeadAGI operation), so this is a
+		 * short-lived code addition.
+		 */
+		if (waitpid(pid, status, WNOHANG) == 0) {
+			struct zombie *cur = ast_calloc(1, sizeof(*cur));
+			if (cur) {
+				cur->pid = pid;
+				AST_LIST_LOCK(&zombies);
+				AST_LIST_INSERT_TAIL(&zombies, cur, list);
+				AST_LIST_UNLOCK(&zombies);
+			}
 		}
 	}
 	fclose(readf);
@@ -1943,7 +2038,7 @@ static int handle_showagi(int fd, int argc, char *argv[])
 	if (argc > 2) {
 		e = find_command(argv + 2, 1);
 		if (e) 
-			ast_cli(fd, e->usage);
+			ast_cli(fd, "%s", e->usage);
 		else {
 			if (find_command(argv + 2, -1)) {
 				return help_workhorse(fd, argv + 1);
@@ -2023,7 +2118,7 @@ static int agi_exec_full(struct ast_channel *chan, void *data, int enhanced, int
 	int fds[2];
 	int efd = -1;
 	int pid;
-        char *stringp;
+	char *stringp;
 	AGI agi;
 
 	if (ast_strlen_zero(data)) {
@@ -2047,6 +2142,7 @@ static int agi_exec_full(struct ast_channel *chan, void *data, int enhanced, int
 		}
 	}
 #endif
+	ast_replace_sigchld();
 	res = launch_script(argv[0], argv, fds, enhanced ? &efd : NULL, &pid);
 	if (res == AGI_RESULT_SUCCESS || res == AGI_RESULT_SUCCESS_FAST) {
 		int status = 0;
@@ -2062,8 +2158,8 @@ static int agi_exec_full(struct ast_channel *chan, void *data, int enhanced, int
 			close(fds[1]);
 		if (efd > -1)
 			close(efd);
-		ast_unreplace_sigchld();
 	}
+	ast_unreplace_sigchld();
 	ast_module_user_remove(u);
 
 	switch (res) {
@@ -2161,17 +2257,58 @@ static struct ast_cli_entry cli_agi[] = {
 	dumpagihtml_help, NULL, &cli_dump_agihtml_deprecated },
 };
 
+static void *shaun_of_the_dead(void *data)
+{
+	struct zombie *cur;
+	int status;
+	for (;;) {
+		if (!AST_LIST_EMPTY(&zombies)) {
+			/* Don't allow cancellation while we have a lock. */
+			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+			AST_LIST_LOCK(&zombies);
+			AST_LIST_TRAVERSE_SAFE_BEGIN(&zombies, cur, list) {
+				if (waitpid(cur->pid, &status, WNOHANG) != 0) {
+					AST_LIST_REMOVE_CURRENT(&zombies, list);
+					ast_free(cur);
+				}
+			}
+			AST_LIST_TRAVERSE_SAFE_END
+			AST_LIST_UNLOCK(&zombies);
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+		}
+		pthread_testcancel();
+		/* Wait for 60 seconds, without engaging in a busy loop. */
+		ast_poll(NULL, 0, 60000);
+	}
+	return NULL;
+}
+
 static int unload_module(void)
 {
+	int res;
+	struct zombie *cur;
 	ast_module_user_hangup_all();
 	ast_cli_unregister_multiple(cli_agi, sizeof(cli_agi) / sizeof(struct ast_cli_entry));
 	ast_unregister_application(eapp);
 	ast_unregister_application(deadapp);
-	return ast_unregister_application(app);
+	res = ast_unregister_application(app);
+	if (shaun_of_the_dead_thread != AST_PTHREADT_NULL) {
+		pthread_cancel(shaun_of_the_dead_thread);
+		pthread_kill(shaun_of_the_dead_thread, SIGURG);
+		pthread_join(shaun_of_the_dead_thread, NULL);
+	}
+	while ((cur = AST_LIST_REMOVE_HEAD(&zombies, list))) {
+		ast_free(cur);
+	}
+	return res;
 }
 
 static int load_module(void)
 {
+	if (ast_pthread_create_background(&shaun_of_the_dead_thread, NULL, shaun_of_the_dead, NULL)) {
+		ast_log(LOG_ERROR, "Shaun of the Dead wants to kill zombies, but can't?!!\n");
+		shaun_of_the_dead_thread = AST_PTHREADT_NULL;
+	}
 	ast_cli_register_multiple(cli_agi, sizeof(cli_agi) / sizeof(struct ast_cli_entry));
 	ast_register_application(deadapp, deadagi_exec, deadsynopsis, descrip);
 	ast_register_application(eapp, eagi_exec, esynopsis, descrip);

@@ -2,6 +2,7 @@
 <member name="res_adsi" displayname="ADSI Resource" remove_on_change="res/res_adsi.o res/res_adsi.so">
 </member>
 <member name="res_agi" displayname="Asterisk Gateway Interface (AGI)" remove_on_change="res/res_agi.o res/res_agi.so">
+	<depend>working_fork</depend>
 </member>
 <member name="res_clioriginate" displayname="Call origination from the CLI" remove_on_change="res/res_clioriginate.o res/res_clioriginate.so">
 </member>
@@ -20,6 +21,7 @@
 </member>
 <member name="res_features" displayname="Call Features Resource" remove_on_change="res/res_features.o res/res_features.so">
         <depend>chan_local</depend>
+        <depend>res_adsi</depend>
 </member>
 <member name="res_indications" displayname="Indications Resource" remove_on_change="res/res_indications.o res/res_indications.so">
 </member>
@@ -31,7 +33,8 @@
 </member>
 <member name="res_musiconhold" displayname="Music On Hold Resource" remove_on_change="res/res_musiconhold.o res/res_musiconhold.so">
 	<conflict>win32</conflict>
-	<use>zaptel</use>
+	<use>dahdi</use>
+	<depend>working_fork</depend>
 </member>
 <member name="res_odbc" displayname="ODBC Resource" remove_on_change="res/res_odbc.o res/res_odbc.so">
 	<depend>unixodbc</depend>

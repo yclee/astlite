@@ -18,9 +18,9 @@
 PWD:=$(shell pwd)
 SOUNDS_DIR:=$(DESTDIR)$(ASTDATADIR)/sounds
 MOH_DIR:=$(DESTDIR)$(ASTDATADIR)/moh
-CORE_SOUNDS_VERSION:=1.4.9
-EXTRA_SOUNDS_VERSION:=1.4.7
-SOUNDS_URL:=http://downloads.digium.com/pub/telephony/sounds/releases
+CORE_SOUNDS_VERSION:=1.4.17
+EXTRA_SOUNDS_VERSION:=1.4.10
+SOUNDS_URL:=http://downloads.asterisk.org/pub/telephony/sounds/releases
 MCS:=$(subst -EN-,-en-,$(MENUSELECT_CORE_SOUNDS))
 MCS:=$(subst -FR-,-fr-,$(MCS))
 MCS:=$(subst -ES-,-es-,$(MCS))
@@ -43,7 +43,7 @@ MES:=$(subst -G729,-g729,$(MES))
 MES:=$(subst -G722,-g722,$(MES))
 EXTRA_SOUNDS:=$(MES:EXTRA-SOUNDS-%=asterisk-extra-sounds-%-$(EXTRA_SOUNDS_VERSION).tar.gz)
 EXTRA_SOUND_TAGS:=$(MES:EXTRA-SOUNDS-%=$(SOUNDS_DIR)/.asterisk-extra-sounds-%-$(EXTRA_SOUNDS_VERSION))
-MM:=$(subst -FREEPLAY-,-freeplay-,$(MENUSELECT_MOH))
+MM:=$(subst -OPSOUND-,-opsound-,$(MENUSELECT_MOH))
 MM:=$(subst -WAV,-wav,$(MM))
 MM:=$(subst -ULAW,-ulaw,$(MM))
 MM:=$(subst -ALAW,-alaw,$(MM))
@@ -53,8 +53,8 @@ MM:=$(subst -G722,-g722,$(MM))
 MOH:=$(MM:MOH-%=asterisk-moh-%.tar.gz)
 MOH_TAGS:=$(MM:MOH-%=$(MOH_DIR)/.asterisk-moh-%)
 # If "fetch" is used, --continue is not a valid option.
-ifeq ($(WGET),wget)
-WGET_ARGS:=--continue
+ifneq ($(findstring wget,$(WGET)),)
+WGET_ARGS:=--continue $(WGET_EXTRA_ARGS)
 endif
 
 all: $(CORE_SOUNDS) $(EXTRA_SOUNDS) $(MOH)
@@ -80,7 +80,7 @@ $(SOUNDS_DIR)/.asterisk-core-sounds-en-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(CORE_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(SOUNDS_DIR)/.asterisk-core-sounds-es-%: have_download
@@ -88,7 +88,7 @@ $(SOUNDS_DIR)/.asterisk-core-sounds-es-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(CORE_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR)/es; cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR)/es; cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(SOUNDS_DIR)/.asterisk-core-sounds-fr-%: have_download
@@ -96,7 +96,7 @@ $(SOUNDS_DIR)/.asterisk-core-sounds-fr-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(CORE_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR)/fr; cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR)/fr; cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(SOUNDS_DIR)/.asterisk-extra-sounds-en-%: have_download
@@ -104,7 +104,7 @@ $(SOUNDS_DIR)/.asterisk-extra-sounds-en-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(EXTRA_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(SOUNDS_DIR)/.asterisk-extra-sounds-es-%: have_download
@@ -112,7 +112,7 @@ $(SOUNDS_DIR)/.asterisk-extra-sounds-es-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(EXTRA_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR)/es; cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR)/es; cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(SOUNDS_DIR)/.asterisk-extra-sounds-fr-%: have_download
@@ -120,14 +120,14 @@ $(SOUNDS_DIR)/.asterisk-extra-sounds-fr-%: have_download
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
 	rm -f $(subst -$(EXTRA_SOUNDS_VERSION),,$@)-* && \
-	(cd $(SOUNDS_DIR)/fr; cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(SOUNDS_DIR)/fr; cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 $(MOH_DIR)/.asterisk-moh-%: have_download
 	@PACKAGE=$(subst $(MOH_DIR)/.asterisk,asterisk,$@).tar.gz; \
 	if test ! -f $${PACKAGE}; then $(DOWNLOAD) $(WGET_ARGS) $(SOUNDS_URL)/$${PACKAGE}; fi; \
 	if test ! -f $${PACKAGE}; then exit 1; fi; \
-	(cd $(MOH_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xf -) && \
+	(cd $(MOH_DIR); cat $(PWD)/$${PACKAGE} | gzip -d | tar xof -) && \
 	touch $@
 
 asterisk-core-%.tar.gz: have_download

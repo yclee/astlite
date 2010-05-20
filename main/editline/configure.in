@@ -18,6 +18,7 @@ AC_SUBST(A_CFLAGS)
 S_CFLAGS="-fPIC -DPIC"
 AC_SUBST(S_CFLAGS)
 AC_PROG_CPP
+AC_PROG_AWK
 
 dnl Platform-specific settings.  The ABI can probably be determined
 dnl programmatically, but doing so is error-prone, which makes it generally
@@ -100,6 +101,8 @@ AC_CHECK_FUNCS(strlcpy, , CCSRCS="$CCSRCS np/strlcpy.c")
 AC_CHECK_FUNCS(fgetln, , CCSRCS="$CCSRCS np/fgetln.c")
 AC_CHECK_FUNCS(strvis, , CCSRCS="$CCSRCS np/vis.c")
 AC_CHECK_FUNCS(strunvis, , CCSRCS="$CCSRCS np/unvis.c")
+AC_CHECK_FUNCS(strlcpy, , CCSRCS="$CCSRCS np/strlcpy.c")
+AC_CHECK_FUNCS(strlcat, , CCSRCS="$CCSRCS np/strlcat.c")
 
 AC_EGREP_CPP(yes,
 [#include <sys/cdefs.h>
@@ -273,4 +276,5 @@ AC_SUBST(TEST)
 AC_SUBST(TCSRCS)
 
 AC_CONFIG_HEADER(config.h)
-AC_OUTPUT(Makefile)
+AC_OUTPUT([Makefile makelist])
+

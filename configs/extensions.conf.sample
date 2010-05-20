@@ -73,6 +73,19 @@ clearglobalvars=no
 ; that includes contexts within other contexts. The #include command works
 ; in all asterisk configuration files.
 ;#include "filename.conf"
+;#include <filename.conf>
+;#include filename.conf
+;
+; You can execute a program or script that produces config files, and they
+; will be inserted where you insert the #exec command. The #exec command 
+; works on all asterisk configuration files.  However, you will need to
+; activate them within asterisk.conf with the "execincludes" option.  They
+; are otherwise considered a security risk.
+;#exec /opt/bin/build-extra-contexts.sh
+;#exec /opt/bin/build-extra-contexts.sh --foo="bar"
+;#exec </opt/bin/build-extra-contexts.sh --foo="bar">
+;#exec "/opt/bin/build-extra-contexts.sh --foo=\"bar\""
+;
 
 ; The "Globals" category contains global variables that can be referenced
 ; in the dialplan with the GLOBAL dialplan function:
@@ -90,7 +103,7 @@ IAXINFO=guest					; IAXtel username/password
 TRUNK=Zap/G2					; Trunk interface
 ;
 ; Note the 'G2' in the TRUNK variable above. It specifies which group (defined
-; in zapata.conf) to dial, i.e. group 2, and how to choose a channel to use in
+; in chan_dahdi.conf) to dial, i.e. group 2, and how to choose a channel to use in
 ; the specified group. The four possible options are:
 ;
 ; g: select the lowest-numbered non-busy Zap channel
@@ -104,7 +117,13 @@ TRUNK=Zap/G2					; Trunk interface
 ;
 TRUNKMSD=1					; MSD digits to strip (usually 1 or 0)
 ;TRUNK=IAX2/user:pass@provider
-
+;
+; WARNING WARNING WARNING WARNING
+; If you load any other extension configuration engine, such as pbx_ael.so,
+; your global variables may be overridden by that file.  Please take care to
+; use only one location to set global variables, and you will likely save
+; yourself a ton of grief.
+; WARNING WARNING WARNING WARNING
 ;
 ; Any category other than "General" and "Globals" represent 
 ; extension contexts, which are collections of extensions.  
@@ -289,7 +308,7 @@ exten => _91700XXXXXXX,1,Dial(IAX2/${GLOBAL(IAXINFO)}@iaxtel.com/${EXTEN:1}@iaxt
 ; International long distance through trunk
 ;
 exten => _9011.,1,Macro(dundi-e164,${EXTEN:4})
-exten => _9011.,n,Dial(${GLOBAL(TRUNK)}/${EXTEN:${GLOBAL(TRUNKMSD)}})
+exten => _9011.,n,Dial(${GLOBAL(TRUNK)}/${FILTER(0123456789,${EXTEN:${GLOBAL(TRUNKMSD)}})})
 
 [trunkld]
 ;
@@ -430,7 +449,7 @@ exten => a,1,VoicemailMain(${ARG1})		; If they press *, send the user into Voice
 ;   ${ARG1} - Device to page
 
 exten => s,1,ChanIsAvail(${ARG1}|js)			; j is for Jump and s is for ANY call
-exten => s,n,GoToIf([${AVAILSTATUS} = "1"]?autoanswer:fail)
+exten => s,n,GoToIf([${AVAILORIGCHAN} = ""]?fail:autoanswer)
 exten => s,n(autoanswer),Set(_ALERT_INFO="RA")			; This is for the PolyComs
 exten => s,n,SIPAddHeader(Call-Info: Answer-After=0)	; This is for the Grandstream, Snoms, and Others
 exten => s,n,NoOp()					; Add others here and Post on the Wiki!!!!
@@ -559,7 +578,7 @@ include => demo
 ; An extension like the one below can be used for FWD, Nikotel, sipgate etc.
 ; Note that you must have a [sipprovider] section in sip.conf
 ;
-;exten => _41X.,1,Dial(SIP/${EXTEN:2}@sipprovider,,r)
+;exten => _41X.,1,Dial(SIP/${FILTER(0123456789,${EXTEN:2})}@sipprovider,,r)
 
 ; Real extensions would go here. Generally you want real extensions to be
 ; 4 or 5 digits long (although there is no such requirement) and start with a

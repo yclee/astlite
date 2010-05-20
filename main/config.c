@@ -28,7 +28,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109908 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 241015 $")
 
 #include <stdio.h>
 #include <unistd.h>
@@ -39,9 +39,6 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109908 $")
 #include <sys/stat.h>
 #define AST_INCLUDE_GLOB 1
 #ifdef AST_INCLUDE_GLOB
-#if defined(__Darwin__) || defined(__CYGWIN__)
-#define GLOB_ABORTED GLOB_ABEND
-#endif
 # include <glob.h>
 #endif
 
@@ -186,6 +183,8 @@ struct ast_config {
 	int max_include_level;
 };
 
+static void ast_destroy_comment(struct ast_comment **comment);
+
 struct ast_variable *ast_variable_new(const char *name, const char *value) 
 {
 	struct ast_variable *variable;
@@ -221,6 +220,8 @@ void ast_variables_destroy(struct ast_variable *v)
 	while(v) {
 		vn = v;
 		v = v->next;
+		ast_destroy_comment(&vn->precomments);
+		ast_destroy_comment(&vn->sameline);
 		free(vn);
 	}
 }
@@ -347,19 +348,22 @@ void ast_category_append(struct ast_config *config, struct ast_category *categor
 	config->current = category;
 }
 
-static void ast_destroy_comments(struct ast_category *cat)
+static void ast_destroy_comment(struct ast_comment **comment)
 {
 	struct ast_comment *n, *p;
-	for (p=cat->precomments; p; p=n) {
+
+	for (p = *comment; p; p = n) {
 		n = p->next;
 		free(p);
 	}
-	for (p=cat->sameline; p; p=n) {
-		n = p->next;
-		free(p);
-	}
-	cat->precomments = NULL;
-	cat->sameline = NULL;
+
+	*comment = NULL;
+}
+
+static void ast_destroy_comments(struct ast_category *cat)
+{
+	ast_destroy_comment(&cat->precomments);
+	ast_destroy_comment(&cat->sameline);
 }
 
 static void ast_destroy_template_list(struct ast_category *cat)
@@ -720,16 +724,25 @@ static int process_text_line(struct ast_config *cfg, struct ast_category **cat, 
 		}
 		if (do_include || do_exec) {
 			if (c) {
-				/* Strip off leading and trailing "'s and <>'s */
-				while((*c == '<') || (*c == '>') || (*c == '\"')) c++;
-				/* Get rid of leading mess */
 				cur = c;
-				while (!ast_strlen_zero(cur)) {
-					c = cur + strlen(cur) - 1;
-					if ((*c == '>') || (*c == '<') || (*c == '\"'))
-						*c = '\0';
-					else
-						break;
+				/* Strip off leading and trailing "'s and <>'s */
+				if (*c == '"') {
+					/* Dequote */
+					while (*c) {
+						if (*c == '"') {
+							strcpy(c, c + 1); /* SAFE */
+							c--;
+						} else if (*c == '\\') {
+							strcpy(c, c + 1); /* SAFE */
+						}
+						c++;
+					}
+				} else if (*c == '<') {
+					/* C-style include */
+					if (*(c + strlen(c) - 1) == '>') {
+						cur++;
+						*(c + strlen(c) - 1) = '\0';
+					}
 				}
 				/* #exec </path/to/executable>
 				   We create a tmp file, then we #include it, then we delete it. */
@@ -765,7 +778,7 @@ static int process_text_line(struct ast_config *cfg, struct ast_category **cat, 
 			}
 		}
 		else 
-			ast_log(LOG_WARNING, "Unknown directive '%s' at line %d of %s\n", cur, lineno, configfile);
+			ast_log(LOG_WARNING, "Unknown directive '#%s' at line %d of %s\n", cur, lineno, configfile);
 	} else {
 		/* Just a line (variable = value) */
 		if (!(*cat)) {
@@ -812,7 +825,11 @@ static int process_text_line(struct ast_config *cfg, struct ast_category **cat, 
 static struct ast_config *config_text_file_load(const char *database, const char *table, const char *filename, struct ast_config *cfg, int withcomments)
 {
 	char fn[256];
+#if defined(LOW_MEMORY)
+	char buf[512];
+#else
 	char buf[8192];
+#endif
 	char *new_buf, *comment_p, *process_buf;
 	FILE *f;
 	int lineno=0;
@@ -848,11 +865,7 @@ static struct ast_config *config_text_file_load(const char *database, const char
 		int glob_ret;
 		glob_t globbuf;
 		globbuf.gl_offs = 0;	/* initialize it to silence gcc */
-#ifdef SOLARIS
-		glob_ret = glob(fn, GLOB_NOCHECK, NULL, &globbuf);
-#else
-		glob_ret = glob(fn, GLOB_NOMAGIC|GLOB_BRACE, NULL, &globbuf);
-#endif
+		glob_ret = glob(fn, MY_GLOB_FLAGS, NULL, &globbuf);
 		if (glob_ret == GLOB_NOSPACE)
 			ast_log(LOG_WARNING,
 				"Glob Expansion of pattern '%s' failed: Not enough memory\n", fn);
@@ -1009,6 +1022,7 @@ int config_text_file_save(const char *configfile, const struct ast_config *cfg, 
 	struct ast_comment *cmt;
 	struct stat s;
 	int blanklines = 0;
+	int stat_result = 0;
 
 	if (configfile[0] == '/') {
 		snprintf(fntmp, sizeof(fntmp), "%s.XXXXXX", configfile);
@@ -1120,10 +1134,11 @@ int config_text_file_save(const char *configfile, const struct ast_config *cfg, 
 			close(fd);
 		return -1;
 	}
-	stat(fn, &s);
-	fchmod(fd, s.st_mode);
+	if (!(stat_result = stat(fn, &s))) {
+		fchmod(fd, s.st_mode);
+	}
 	fclose(f);
-	if (unlink(fn) || link(fntmp, fn)) {
+	if ((!stat_result && unlink(fn)) || link(fntmp, fn)) {
 		if (option_debug)
 			ast_log(LOG_DEBUG, "Unable to open for writing: %s (%s)\n", fn, strerror(errno));
 		if (option_verbose > 1)

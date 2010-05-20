@@ -1,4 +1,6 @@
 <category name="MENUSELECT_FUNCS" displayname="Dialplan Functions" remove_on_change="funcs/modules.link">
+<member name="func_audiohookinherit" displayname="Audiohook inheritance function" remove_on_change="funcs/func_audiohookinherit.o funcs/func_audiohookinherit.so">
+</member>
 <member name="func_base64" displayname="base64 encode/decode dialplan functions" remove_on_change="funcs/func_base64.o funcs/func_base64.so">
 </member>
 <member name="func_callerid" displayname="Caller ID related dialplan function" remove_on_change="funcs/func_callerid.o funcs/func_callerid.so">
