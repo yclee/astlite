@@ -29,7 +29,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 104536 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 245909 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -309,8 +309,10 @@ static inline void unref_msg(void *msg, enum smdi_message_type type)
 	switch (type) {
 	case SMDI_MWI:
 		ASTOBJ_UNREF(mwi_msg, ast_smdi_mwi_message_destroy);
+		break;
 	case SMDI_MD:
 		ASTOBJ_UNREF(md_msg, ast_smdi_md_message_destroy);
+		break;
 	}
 }
 
@@ -369,8 +371,13 @@ static void *smdi_msg_pop(struct ast_smdi_interface *iface, enum smdi_message_ty
 	return msg;
 }
 
+enum {
+	OPT_SEARCH_TERMINAL = (1 << 0),
+	OPT_SEARCH_NUMBER   = (1 << 1),
+};
+
 static void *smdi_msg_find(struct ast_smdi_interface *iface,
-	enum smdi_message_type type, const char *station)
+	enum smdi_message_type type, const char *search_key, struct ast_flags options)
 {
 	void *msg = NULL;
 
@@ -378,10 +385,59 @@ static void *smdi_msg_find(struct ast_smdi_interface *iface,
 
 	switch (type) {
 	case SMDI_MD:
-		msg = ASTOBJ_CONTAINER_FIND(&iface->md_q, station);
+		if (ast_strlen_zero(search_key)) {
+			struct ast_smdi_md_message *md_msg = NULL;
+
+			/* No search key provided (the code from chan_dahdi does this).
+			 * Just pop the top message off of the queue. */
+
+			ASTOBJ_CONTAINER_TRAVERSE(&iface->md_q, !md_msg, do {
+				md_msg = ASTOBJ_REF(iterator);
+			} while (0); );
+
+			msg = md_msg;
+		} else if (ast_test_flag(&options, OPT_SEARCH_TERMINAL)) {
+			struct ast_smdi_md_message *md_msg = NULL;
+
+			/* Searching by the message desk terminal */
+
+			ASTOBJ_CONTAINER_TRAVERSE(&iface->md_q, !md_msg, do {
+				if (!strcasecmp(iterator->mesg_desk_term, search_key))
+					md_msg = ASTOBJ_REF(iterator);
+			} while (0); );
+
+			msg = md_msg;
+		} else if (ast_test_flag(&options, OPT_SEARCH_NUMBER)) {
+			struct ast_smdi_md_message *md_msg = NULL;
+
+			/* Searching by the message desk number */
+
+			ASTOBJ_CONTAINER_TRAVERSE(&iface->md_q, !md_msg, do {
+				if (!strcasecmp(iterator->mesg_desk_num, search_key))
+					md_msg = ASTOBJ_REF(iterator);
+			} while (0); );
+
+			msg = md_msg;
+		} else {
+			/* Searching by the forwarding station */
+			msg = ASTOBJ_CONTAINER_FIND(&iface->md_q, search_key);
+		}
 		break;
 	case SMDI_MWI:
-		msg = ASTOBJ_CONTAINER_FIND(&iface->mwi_q, station);
+		if (ast_strlen_zero(search_key)) {
+			struct ast_smdi_mwi_message *mwi_msg = NULL;
+
+			/* No search key provided (the code from chan_dahdi does this).
+			 * Just pop the top message off of the queue. */
+
+			ASTOBJ_CONTAINER_TRAVERSE(&iface->mwi_q, !mwi_msg, do {
+				mwi_msg = ASTOBJ_REF(iterator);
+			} while (0); );
+
+			msg = mwi_msg;
+		} else {
+			msg = ASTOBJ_CONTAINER_FIND(&iface->mwi_q, search_key);
+		}
 		break;
 	}
 
@@ -389,11 +445,24 @@ static void *smdi_msg_find(struct ast_smdi_interface *iface,
 }
 
 static void *smdi_message_wait(struct ast_smdi_interface *iface, int timeout, 
-	enum smdi_message_type type, const char *station)
+	enum smdi_message_type type, const char *search_key, struct ast_flags options)
 {
 	struct timeval start;
 	long diff = 0;
 	void *msg;
+	ast_cond_t *cond = NULL;
+	ast_mutex_t *lock = NULL;
+
+	switch (type) {
+	case SMDI_MWI:
+		cond = &iface->mwi_q_cond;
+		lock = &iface->mwi_q_lock;
+		break;
+	case SMDI_MD:
+		cond = &iface->md_q_cond;
+		lock = &iface->md_q_lock;
+		break;
+	}
 
 	start = ast_tvnow();
 	while (diff < timeout) {
@@ -402,7 +471,7 @@ static void *smdi_message_wait(struct ast_smdi_interface *iface, int timeout,
 
 		lock_msg_q(iface, type);
 
-		if ((msg = smdi_msg_find(iface, type, station))) {
+		if ((msg = smdi_msg_find(iface, type, search_key, options))) {
 			unlock_msg_q(iface, type);
 			return msg;
 		}
@@ -414,9 +483,9 @@ static void *smdi_message_wait(struct ast_smdi_interface *iface, int timeout,
 		/* If there were no messages in the queue, then go to sleep until one
 		 * arrives. */
 
-		ast_cond_timedwait(&iface->md_q_cond, &iface->md_q_lock, &ts);
+		ast_cond_timedwait(cond, lock, &ts);
 
-		if ((msg = smdi_msg_find(iface, type, station))) {
+		if ((msg = smdi_msg_find(iface, type, search_key, options))) {
 			unlock_msg_q(iface, type);
 			return msg;
 		}
@@ -437,7 +506,8 @@ struct ast_smdi_md_message *ast_smdi_md_message_pop(struct ast_smdi_interface *i
 
 struct ast_smdi_md_message *ast_smdi_md_message_wait(struct ast_smdi_interface *iface, int timeout)
 {
-	return smdi_message_wait(iface, timeout, SMDI_MD, NULL);
+	struct ast_flags options = { 0 };
+	return smdi_message_wait(iface, timeout, SMDI_MD, NULL, options);
 }
 
 struct ast_smdi_mwi_message *ast_smdi_mwi_message_pop(struct ast_smdi_interface *iface)
@@ -447,13 +517,15 @@ struct ast_smdi_mwi_message *ast_smdi_mwi_message_pop(struct ast_smdi_interface 
 
 struct ast_smdi_mwi_message *ast_smdi_mwi_message_wait(struct ast_smdi_interface *iface, int timeout)
 {
-	return smdi_message_wait(iface, timeout, SMDI_MWI, NULL);
+	struct ast_flags options = { 0 };
+	return smdi_message_wait(iface, timeout, SMDI_MWI, NULL, options);
 }
 
 struct ast_smdi_mwi_message *ast_smdi_mwi_message_wait_station(struct ast_smdi_interface *iface, int timeout,
 	const char *station)
 {
-	return smdi_message_wait(iface, timeout, SMDI_MWI, station);
+	struct ast_flags options = { 0 };
+	return smdi_message_wait(iface, timeout, SMDI_MWI, station, options);
 }
 
 struct ast_smdi_interface *ast_smdi_interface_find(const char *iface_name)
@@ -838,7 +910,7 @@ static int smdi_load(int reload)
 				baud_rate = B9600;
 			}
 		} else if (!strcasecmp(v->name, "msdstrip")) {
-			if (!sscanf(v->value, "%d", &msdstrip)) {
+			if (!sscanf(v->value, "%30d", &msdstrip)) {
 				ast_log(LOG_NOTICE, "Invalid msdstrip value in %s (line %d), using default\n", config_file, v->lineno);
 				msdstrip = 0;
 			} else if (0 > msdstrip || msdstrip > 9) {
@@ -846,7 +918,7 @@ static int smdi_load(int reload)
 				msdstrip = 0;
 			}
 		} else if (!strcasecmp(v->name, "msgexpirytime")) {
-			if (!sscanf(v->value, "%ld", &msg_expiry)) {
+			if (!sscanf(v->value, "%30ld", &msg_expiry)) {
 				ast_log(LOG_NOTICE, "Invalid msgexpirytime value in %s (line %d), using default\n", config_file, v->lineno);
 				msg_expiry = SMDI_MSG_EXPIRY_TIME;
 			}
@@ -976,11 +1048,11 @@ static int smdi_load(int reload)
 				ASTOBJ_UNREF(iface, ast_smdi_interface_destroy);
 
 			if (!(iface = ASTOBJ_CONTAINER_FIND(&smdi_ifaces, v->value))) {
-				ast_log(LOG_NOTICE, "SMDI interface %s not found\n", iface->name);
+				ast_log(LOG_NOTICE, "SMDI interface %s not found\n", v->value);
 				continue;
 			}
 		} else if (!strcasecmp(v->name, "pollinginterval")) {
-			if (sscanf(v->value, "%u", &mwi_monitor.polling_interval) != 1) {
+			if (sscanf(v->value, "%30u", &mwi_monitor.polling_interval) != 1) {
 				ast_log(LOG_ERROR, "Invalid value for pollinginterval: %s\n", v->value);
 				mwi_monitor.polling_interval = DEFAULT_POLLING_INTERVAL;
 			}
@@ -1046,14 +1118,21 @@ static int smdi_msg_id;
 /*! In milliseconds */
 #define SMDI_RETRIEVE_TIMEOUT_DEFAULT 3000
 
+AST_APP_OPTIONS(smdi_msg_ret_options, BEGIN_OPTIONS
+	AST_APP_OPTION('t', OPT_SEARCH_TERMINAL),
+	AST_APP_OPTION('n', OPT_SEARCH_NUMBER),
+END_OPTIONS );
+
 static int smdi_msg_retrieve_read(struct ast_channel *chan, char *cmd, char *data, char *buf, size_t len)
 {
 	struct ast_module_user *u;
 	AST_DECLARE_APP_ARGS(args,
 		AST_APP_ARG(port);
-		AST_APP_ARG(station);
+		AST_APP_ARG(search_key);
 		AST_APP_ARG(timeout);
+		AST_APP_ARG(options);
 	);
+	struct ast_flags options = { 0 };
 	unsigned int timeout = SMDI_RETRIEVE_TIMEOUT_DEFAULT;
 	int res = -1;
 	char *parse = NULL;
@@ -1079,7 +1158,7 @@ static int smdi_msg_retrieve_read(struct ast_channel *chan, char *cmd, char *dat
 	parse = ast_strdupa(data);
 	AST_STANDARD_APP_ARGS(args, parse);
 
-	if (ast_strlen_zero(args.port) || ast_strlen_zero(args.station)) {
+	if (ast_strlen_zero(args.port) || ast_strlen_zero(args.search_key)) {
 		ast_log(LOG_ERROR, "Invalid arguments provided to SMDI_MSG_RETRIEVE\n");
 		goto return_error;
 	}
@@ -1089,16 +1168,20 @@ static int smdi_msg_retrieve_read(struct ast_channel *chan, char *cmd, char *dat
 		goto return_error;
 	}
 
+	if (!ast_strlen_zero(args.options)) {
+		ast_app_parse_options(smdi_msg_ret_options, &options, NULL, args.options);
+	}
+
 	if (!ast_strlen_zero(args.timeout)) {
-		if (sscanf(args.timeout, "%u", &timeout) != 1) {
+		if (sscanf(args.timeout, "%30u", &timeout) != 1) {
 			ast_log(LOG_ERROR, "'%s' is not a valid timeout\n", args.timeout);
 			timeout = SMDI_RETRIEVE_TIMEOUT_DEFAULT;
 		}
 	}
 
-	if (!(md_msg = smdi_message_wait(iface, timeout, SMDI_MD, args.station))) {
-		ast_log(LOG_WARNING, "No SMDI message retrieved for station '%s' after "
-			"waiting %u ms.\n", args.station, timeout);
+	if (!(md_msg = smdi_message_wait(iface, timeout, SMDI_MD, args.search_key, options))) {
+		ast_log(LOG_WARNING, "No SMDI message retrieved for search key '%s' after "
+			"waiting %u ms.\n", args.search_key, timeout);
 		goto return_error;
 	}
 
@@ -1187,7 +1270,11 @@ static int smdi_msg_read(struct ast_channel *chan, char *cmd, char *data, char *
 
 	smd = datastore->data;
 
-	if (!strcasecmp(args.component, "station")) {
+	if (!strcasecmp(args.component, "number")) {
+		ast_copy_string(buf, smd->md_msg->mesg_desk_num, len);
+	} else if (!strcasecmp(args.component, "terminal")) {
+		ast_copy_string(buf, smd->md_msg->mesg_desk_term, len);
+	} else if (!strcasecmp(args.component, "station")) {
 		ast_copy_string(buf, smd->md_msg->fwd_st, len);
 	} else if (!strcasecmp(args.component, "callerid")) {
 		ast_copy_string(buf, smd->md_msg->calling_st, len);
@@ -1204,13 +1291,13 @@ static int smdi_msg_read(struct ast_channel *chan, char *cmd, char *data, char *
 return_error:
 	ast_module_user_remove(u);
 
-	return 0;
+	return res;
 }
 
 static struct ast_custom_function smdi_msg_retrieve_function = {
 	.name = "SMDI_MSG_RETRIEVE",
 	.synopsis = "Retrieve an SMDI message.",
-	.syntax = "SMDI_MSG_RETRIEVE(<smdi port>,<station>[,timeout])",
+	.syntax = "SMDI_MSG_RETRIEVE(<smdi port>,<search key>[,timeout[,options]])",
 	.desc = 
 	"   This function is used to retrieve an incoming SMDI message.  It returns\n"
 	"an ID which can be used with the SMDI_MSG() function to access details of\n"
@@ -1219,6 +1306,14 @@ static struct ast_custom_function smdi_msg_retrieve_function = {
 	"the global SMDI message queue, and can not be accessed by any other Asterisk\n"
 	"channels.  The timeout for this function is optional, and the default is\n"
 	"3 seconds.  When providing a timeout, it should be in milliseconds.\n"
+	"   The default search is done on the forwarding station ID.  However, if\n"
+	"you set one of the search key options in the options field, you can change\n"
+	"this behavior.\n"
+	"   Options:\n"
+	"     t - Instead of searching on the forwarding station, search on the message\n"
+	"         desk terminal.\n"
+	"     n - Instead of searching on the forwarding station, search on the message\n"
+	"         desk number.\n"
 	"",
 	.read = smdi_msg_retrieve_read,
 };
@@ -1232,6 +1327,8 @@ static struct ast_custom_function smdi_msg_function = {
 	"pulled from the incoming SMDI message queue using the SMDI_MSG_RETRIEVE()\n"
 	"function.\n"
 	"   Valid message components are:\n"
+	"      number   - The message desk number\n"
+	"      terminal - The message desk terminal\n"
 	"      station  - The forwarding station\n"
 	"      callerid - The callerID of the calling party that was forwarded\n"
 	"      type     - The call type.  The value here is the exact character\n"
@@ -1241,6 +1338,8 @@ static struct ast_custom_function smdi_msg_function = {
 	"",
 	.read = smdi_msg_read,
 };
+
+static int unload_module(void);
 
 static int load_module(void)
 {
@@ -1259,10 +1358,14 @@ static int load_module(void)
 	/* load the config and start the listener threads*/
 	res = smdi_load(0);
 	if (res < 0) {
+		unload_module();
 		return res;
 	} else if (res == 1) {
 		ast_log(LOG_WARNING, "No SMDI interfaces are available to listen on, not starting SMDI listener.\n");
-		return AST_MODULE_LOAD_DECLINE;
+		/*! \note Since chan_dahdi depends on this module, we need to load the module in inactive state
+			instead of AST_MODULE_LOAD_DECLINE. This is fixed in later releases of Asterisk. 
+		*/
+		return AST_MODULE_LOAD_SUCCESS;
 	}
 
 	return 0;

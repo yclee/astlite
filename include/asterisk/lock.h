@@ -49,7 +49,11 @@
 #include <netdb.h>
 #include <time.h>
 #include <sys/param.h>
+#include <unistd.h>
 
+#ifndef HAVE_PTHREAD_RWLOCK_TIMEDWRLOCK
+#include "asterisk/time.h"
+#endif
 #include "asterisk/logger.h"
 
 /* internal macro to profile mutexes. Only computes the delay on
@@ -101,7 +105,6 @@
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
 
 #define AST_MUTEX_INIT_VALUE { PTHREAD_MUTEX_INIT_VALUE, 1, { NULL }, { 0 }, 0, { NULL }, { 0 }, PTHREAD_MUTEX_INIT_VALUE }
 #define AST_MUTEX_INIT_VALUE_NOTRACKING \
@@ -141,18 +144,31 @@ enum ast_lock_type {
  * lock info struct.  The lock is marked as pending as the thread is waiting
  * on the lock.  ast_mark_lock_acquired() will mark it as held by this thread.
  */
+#if !defined(LOW_MEMORY)
 void ast_store_lock_info(enum ast_lock_type type, const char *filename,
 	int line_num, const char *func, const char *lock_name, void *lock_addr);
+#else
+#define ast_store_lock_info(I,DONT,CARE,ABOUT,THE,PARAMETERS)
+#endif
+
 
 /*!
  * \brief Mark the last lock as acquired
  */
+#if !defined(LOW_MEMORY)
 void ast_mark_lock_acquired(void *lock_addr);
+#else
+#define ast_mark_lock_acquired(ignore)
+#endif
 
 /*!
  * \brief Mark the last lock as failed (trylock)
  */
+#if !defined(LOW_MEMORY)
 void ast_mark_lock_failed(void *lock_addr);
+#else
+#define ast_mark_lock_failed(ignore)
+#endif
 
 /*!
  * \brief remove lock info for the current thread
@@ -160,7 +176,43 @@ void ast_mark_lock_failed(void *lock_addr);
  * this gets called by ast_mutex_unlock so that information on the lock can
  * be removed from the current thread's lock info struct.
  */
+#if !defined(LOW_MEMORY)
 void ast_remove_lock_info(void *lock_addr);
+#else
+#define ast_remove_lock_info(ignore)
+#endif
+
+/*!
+ * \brief retrieve lock info for the specified mutex
+ *
+ * this gets called during deadlock avoidance, so that the information may
+ * be preserved as to what location originally acquired the lock.
+ */
+#if !defined(LOW_MEMORY)
+int ast_find_lock_info(void *lock_addr, char *filename, size_t filename_size, int *lineno, char *func, size_t func_size, char *mutex_name, size_t mutex_name_size);
+#else
+#define ast_find_lock_info(a,b,c,d,e,f,g,h) -1
+#endif
+
+/*!
+ * \brief Unlock a lock briefly
+ *
+ * used during deadlock avoidance, to preserve the original location where
+ * a lock was originally acquired.
+ */
+#define DEADLOCK_AVOIDANCE(lock) \
+	do { \
+		char __filename[80], __func[80], __mutex_name[80]; \
+		int __lineno; \
+		int __res = ast_find_lock_info(lock, __filename, sizeof(__filename), &__lineno, __func, sizeof(__func), __mutex_name, sizeof(__mutex_name)); \
+		ast_mutex_unlock(lock); \
+		usleep(1); \
+		if (__res < 0) { /* Shouldn't ever happen, but just in case... */ \
+			ast_mutex_lock(lock); \
+		} else { \
+			__ast_pthread_mutex_lock(__filename, __lineno, __func, __mutex_name, lock); \
+		} \
+	} while (0)
 
 static void __attribute__((constructor)) init_empty_mutex(void)
 {
@@ -237,6 +289,7 @@ static inline int __ast_pthread_mutex_init(int track, const char *filename, int 
 #define ast_mutex_init_notracking(pmutex) \
 	__ast_pthread_mutex_init(0, __FILE__, __LINE__, __PRETTY_FUNCTION__, #pmutex, pmutex)
 
+#define	ROFFSET	((t->reentrancy > 0) ? (t->reentrancy-1) : 0)
 static inline int __ast_pthread_mutex_destroy(const char *filename, int lineno, const char *func,
 						const char *mutex_name, ast_mutex_t *t)
 {
@@ -271,7 +324,7 @@ static inline int __ast_pthread_mutex_destroy(const char *filename, int lineno, 
 				   filename, lineno, func, mutex_name);
 		ast_reentrancy_lock(t);
 		__ast_mutex_logger("%s line %d (%s): Error: '%s' was locked here.\n",
-			    t->file[t->reentrancy-1], t->lineno[t->reentrancy-1], t->func[t->reentrancy-1], mutex_name);
+			    t->file[ROFFSET], t->lineno[ROFFSET], t->func[ROFFSET], mutex_name);
 		ast_reentrancy_unlock(t);
 		break;
 	}
@@ -338,8 +391,8 @@ static inline int __ast_pthread_mutex_lock(const char *filename, int lineno, con
 							   filename, lineno, func, (int) wait_time, mutex_name);
 					ast_reentrancy_lock(t);
 					__ast_mutex_logger("%s line %d (%s): '%s' was locked here.\n",
-							   t->file[t->reentrancy-1], t->lineno[t->reentrancy-1],
-							   t->func[t->reentrancy-1], mutex_name);
+							   t->file[ROFFSET], t->lineno[ROFFSET],
+							   t->func[ROFFSET], mutex_name);
 					ast_reentrancy_unlock(t);
 					reported_wait = wait_time;
 				}
@@ -449,11 +502,11 @@ static inline int __ast_pthread_mutex_unlock(const char *filename, int lineno, c
 #endif /* AST_MUTEX_INIT_W_CONSTRUCTORS */
 
 	ast_reentrancy_lock(t);
-	if (t->reentrancy && (t->thread[t->reentrancy-1] != pthread_self())) {
+	if (t->reentrancy && (t->thread[ROFFSET] != pthread_self())) {
 		__ast_mutex_logger("%s line %d (%s): attempted unlock mutex '%s' without owning it!\n",
 				   filename, lineno, func, mutex_name);
 		__ast_mutex_logger("%s line %d (%s): '%s' was locked here.\n",
-				   t->file[t->reentrancy-1], t->lineno[t->reentrancy-1], t->func[t->reentrancy-1], mutex_name);
+				   t->file[ROFFSET], t->lineno[ROFFSET], t->func[ROFFSET], mutex_name);
 		DO_THREAD_CRASH;
 	}
 
@@ -528,11 +581,11 @@ static inline int __ast_cond_wait(const char *filename, int lineno, const char *
 #endif /* AST_MUTEX_INIT_W_CONSTRUCTORS */
 
 	ast_reentrancy_lock(t);
-	if (t->reentrancy && (t->thread[t->reentrancy-1] != pthread_self())) {
+	if (t->reentrancy && (t->thread[ROFFSET] != pthread_self())) {
 		__ast_mutex_logger("%s line %d (%s): attempted unlock mutex '%s' without owning it!\n",
 				   filename, lineno, func, mutex_name);
 		__ast_mutex_logger("%s line %d (%s): '%s' was locked here.\n",
-				   t->file[t->reentrancy-1], t->lineno[t->reentrancy-1], t->func[t->reentrancy-1], mutex_name);
+				   t->file[ROFFSET], t->lineno[ROFFSET], t->func[ROFFSET], mutex_name);
 		DO_THREAD_CRASH;
 	}
 
@@ -599,11 +652,11 @@ static inline int __ast_cond_timedwait(const char *filename, int lineno, const c
 #endif /* AST_MUTEX_INIT_W_CONSTRUCTORS */
 
 	ast_reentrancy_lock(t);
-	if (t->reentrancy && (t->thread[t->reentrancy-1] != pthread_self())) {
+	if (t->reentrancy && (t->thread[ROFFSET] != pthread_self())) {
 		__ast_mutex_logger("%s line %d (%s): attempted unlock mutex '%s' without owning it!\n",
 				   filename, lineno, func, mutex_name);
 		__ast_mutex_logger("%s line %d (%s): '%s' was locked here.\n",
-				   t->file[t->reentrancy-1], t->lineno[t->reentrancy-1], t->func[t->reentrancy-1], mutex_name);
+				   t->file[ROFFSET], t->lineno[ROFFSET], t->func[ROFFSET], mutex_name);
 		DO_THREAD_CRASH;
 	}
 
@@ -661,6 +714,11 @@ static inline int __ast_cond_timedwait(const char *filename, int lineno, const c
 #define ast_cond_timedwait(cond, mutex, time) __ast_cond_timedwait(__FILE__, __LINE__, __PRETTY_FUNCTION__, #cond, #mutex, cond, mutex, time)
 
 #else /* !DEBUG_THREADS */
+
+#define	DEADLOCK_AVOIDANCE(lock) \
+	ast_mutex_unlock(lock); \
+	usleep(1); \
+	ast_mutex_lock(lock);
 
 
 typedef pthread_mutex_t ast_mutex_t;
@@ -745,14 +803,14 @@ static inline int ast_cond_timedwait(ast_cond_t *cond, ast_mutex_t *t, const str
  destructors to destroy mutexes and create it on the fly.  */
 #define __AST_MUTEX_DEFINE(scope, mutex, init_val, track) \
 	scope ast_mutex_t mutex = init_val; \
-static void  __attribute__ ((constructor)) init_##mutex(void) \
+static void  __attribute__((constructor)) init_##mutex(void) \
 { \
 	if (track) \
 		ast_mutex_init(&mutex); \
 	else \
 		ast_mutex_init_notracking(&mutex); \
 } \
-static void  __attribute__ ((destructor)) fini_##mutex(void) \
+static void  __attribute__((destructor)) fini_##mutex(void) \
 { \
 	ast_mutex_destroy(&mutex); \
 }
@@ -939,6 +997,104 @@ static inline int _ast_rwlock_wrlock(ast_rwlock_t *lock, const char *name,
 	return res;
 }
 
+#define ast_rwlock_timedrdlock(a,b) \
+	_ast_rwlock_timedrdlock(a, # a, b, __FILE__, __LINE__, __PRETTY_FUNCTION__)
+
+static inline int _ast_rwlock_timedrdlock(ast_rwlock_t *lock, const char *name,
+	const struct timespec *abs_timeout, const char *file, int line, const char *func)
+{
+	int res;
+#ifdef AST_MUTEX_INIT_W_CONSTRUCTORS
+	int canlog = strcmp(file, "logger.c");
+	
+	if (*lock == ((ast_rwlock_t) AST_RWLOCK_INIT_VALUE)) {
+		 /* Don't warn abount uninitialized lock.
+		  * Simple try to initialize it.
+		  * May be not needed in linux system.
+		  */
+		res = __ast_rwlock_init(file, line, func, name, lock);
+		if (*lock == ((ast_rwlock_t) AST_RWLOCK_INIT_VALUE)) {
+			__ast_mutex_logger("%s line %d (%s): Error: rwlock '%s' is uninitialized and unable to initialize.\n",
+					file, line, func, name);
+			return res;
+		}
+	}
+#endif /* AST_MUTEX_INIT_W_CONSTRUCTORS */
+	
+	ast_store_lock_info(AST_RDLOCK, file, line, func, name, lock);
+#ifdef HAVE_PTHREAD_RWLOCK_TIMEDWRLOCK
+	res = pthread_rwlock_timedrdlock(lock, abs_timeout);
+#else
+	do {
+		struct timeval _start = ast_tvnow(), _diff;
+		for (;;) {
+			if (!(res = pthread_rwlock_tryrdlock(lock))) {
+				break;
+			}
+			_diff = ast_tvsub(ast_tvnow(), _start);
+			if (_diff.tv_sec > abs_timeout->tv_sec || (_diff.tv_sec == abs_timeout->tv_sec && _diff.tv_usec * 1000 > abs_timeout->tv_nsec)) {
+				break;
+			}
+			usleep(1);
+		}
+	} while (0);
+#endif
+	if (!res)
+		ast_mark_lock_acquired(lock);
+	else
+		ast_remove_lock_info(lock);
+	return res;
+}
+
+#define ast_rwlock_timedwrlock(a,b) \
+	_ast_rwlock_timedwrlock(a, # a, b, __FILE__, __LINE__, __PRETTY_FUNCTION__)
+
+static inline int _ast_rwlock_timedwrlock(ast_rwlock_t *lock, const char *name,
+	const struct timespec *abs_timeout, const char *file, int line, const char *func)
+{
+	int res;
+#ifdef AST_MUTEX_INIT_W_CONSTRUCTORS
+	int canlog = strcmp(file, "logger.c");
+	
+	if (*lock == ((ast_rwlock_t) AST_RWLOCK_INIT_VALUE)) {
+		 /* Don't warn abount uninitialized lock.
+		  * Simple try to initialize it.
+		  * May be not needed in linux system.
+		  */
+		res = __ast_rwlock_init(file, line, func, name, lock);
+		if (*lock == ((ast_rwlock_t) AST_RWLOCK_INIT_VALUE)) {
+			__ast_mutex_logger("%s line %d (%s): Error: rwlock '%s' is uninitialized and unable to initialize.\n",
+					file, line, func, name);
+			return res;
+		}
+	}
+#endif /* AST_MUTEX_INIT_W_CONSTRUCTORS */
+
+	ast_store_lock_info(AST_WRLOCK, file, line, func, name, lock);
+#ifdef HAVE_PTHREAD_RWLOCK_TIMEDWRLOCK
+	res = pthread_rwlock_timedwrlock(lock, abs_timeout);
+#else
+	do {
+		struct timeval _start = ast_tvnow(), _diff;
+		for (;;) {
+			if (!(res = pthread_rwlock_trywrlock(lock))) {
+				break;
+			}
+			_diff = ast_tvsub(ast_tvnow(), _start);
+			if (_diff.tv_sec > abs_timeout->tv_sec || (_diff.tv_sec == abs_timeout->tv_sec && _diff.tv_usec * 1000 > abs_timeout->tv_nsec)) {
+				break;
+			}
+			usleep(1);
+		}
+	} while (0);
+#endif
+	if (!res)
+		ast_mark_lock_acquired(lock);
+	else
+		ast_remove_lock_info(lock);
+	return res;
+}
+
 #define ast_rwlock_tryrdlock(a) \
 	_ast_rwlock_tryrdlock(a, # a, __FILE__, __LINE__, __PRETTY_FUNCTION__)
 
@@ -1038,6 +1194,27 @@ static inline int ast_rwlock_rdlock(ast_rwlock_t *prwlock)
 	return pthread_rwlock_rdlock(prwlock);
 }
 
+static inline int ast_rwlock_timedrdlock(ast_rwlock_t *prwlock, const struct timespec *abs_timeout)
+{
+	int res;
+#ifdef HAVE_PTHREAD_RWLOCK_TIMEDWRLOCK
+	res = pthread_rwlock_timedrdlock(prwlock, abs_timeout);
+#else
+	struct timeval _start = ast_tvnow(), _diff;
+	for (;;) {
+		if (!(res = pthread_rwlock_tryrdlock(prwlock))) {
+			break;
+		}
+		_diff = ast_tvsub(ast_tvnow(), _start);
+		if (_diff.tv_sec > abs_timeout->tv_sec || (_diff.tv_sec == abs_timeout->tv_sec && _diff.tv_usec * 1000 > abs_timeout->tv_nsec)) {
+			break;
+		}
+		usleep(1);
+	}
+#endif
+	return res;
+}
+
 static inline int ast_rwlock_tryrdlock(ast_rwlock_t *prwlock)
 {
 	return pthread_rwlock_tryrdlock(prwlock);
@@ -1046,6 +1223,29 @@ static inline int ast_rwlock_tryrdlock(ast_rwlock_t *prwlock)
 static inline int ast_rwlock_wrlock(ast_rwlock_t *prwlock)
 {
 	return pthread_rwlock_wrlock(prwlock);
+}
+
+static inline int ast_rwlock_timedwrlock(ast_rwlock_t *prwlock, const struct timespec *abs_timeout)
+{
+	int res;
+#ifdef HAVE_PTHREAD_RWLOCK_TIMEDWRLOCK
+	res = pthread_rwlock_timedwrlock(prwlock, abs_timeout);
+#else
+	do {
+		struct timeval _start = ast_tvnow(), _diff;
+		for (;;) {
+			if (!(res = pthread_rwlock_trywrlock(prwlock))) {
+				break;
+			}
+			_diff = ast_tvsub(ast_tvnow(), _start);
+			if (_diff.tv_sec > abs_timeout->tv_sec || (_diff.tv_sec == abs_timeout->tv_sec && _diff.tv_usec * 1000 > abs_timeout->tv_nsec)) {
+				break;
+			}
+			usleep(1);
+		}
+	} while (0);
+#endif
+	return res;
 }
 
 static inline int ast_rwlock_trywrlock(ast_rwlock_t *prwlock)
@@ -1059,11 +1259,11 @@ static inline int ast_rwlock_trywrlock(ast_rwlock_t *prwlock)
 #ifndef HAVE_PTHREAD_RWLOCK_INITIALIZER
 #define __AST_RWLOCK_DEFINE(scope, rwlock) \
         scope ast_rwlock_t rwlock; \
-static void  __attribute__ ((constructor)) init_##rwlock(void) \
+static void  __attribute__((constructor)) init_##rwlock(void) \
 { \
         ast_rwlock_init(&rwlock); \
 } \
-static void  __attribute__ ((destructor)) fini_##rwlock(void) \
+static void  __attribute__((destructor)) fini_##rwlock(void) \
 { \
         ast_rwlock_destroy(&rwlock); \
 }
@@ -1179,18 +1379,21 @@ AST_INLINE_API(int ast_atomic_dec_and_test(volatile int *p),
 
 struct ast_channel;
 
+#define ast_channel_lock(a) __ast_channel_lock(a, __FILE__, __LINE__, __PRETTY_FUNCTION__)
 /*! \brief Lock AST channel (and print debugging output)
 \note You need to enable DEBUG_CHANNEL_LOCKS for this function */
-int ast_channel_lock(struct ast_channel *chan);
+int __ast_channel_lock(struct ast_channel *chan, const char *file, int lineno, const char *func);
 
+#define ast_channel_unlock(a) __ast_channel_unlock(a, __FILE__, __LINE__, __PRETTY_FUNCTION__)
 /*! \brief Unlock AST channel (and print debugging output)
 \note You need to enable DEBUG_CHANNEL_LOCKS for this function
 */
-int ast_channel_unlock(struct ast_channel *chan);
+int __ast_channel_unlock(struct ast_channel *chan, const char *file, int lineno, const char *func);
 
+#define ast_channel_trylock(a) __ast_channel_trylock(a, __FILE__, __LINE__, __PRETTY_FUNCTION__)
 /*! \brief Lock AST channel (and print debugging output)
 \note   You need to enable DEBUG_CHANNEL_LOCKS for this function */
-int ast_channel_trylock(struct ast_channel *chan);
+int __ast_channel_trylock(struct ast_channel *chan, const char *file, int lineno, const char *func);
 #endif
 
 #endif /* _ASTERISK_LOCK_H */

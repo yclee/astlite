@@ -30,7 +30,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 40722 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,46 +236,46 @@ int ast_playtones_start(struct ast_channel *chan, int vol, const char *playlst, 
 			s++;
 		else if (d.reppos == -1)
 			d.reppos = d.nitems;
-		if (sscanf(s, "%d+%d/%d", &freq1, &freq2, &time) == 3) {
+		if (sscanf(s, "%30d+%30d/%30d", &freq1, &freq2, &time) == 3) {
 			/* f1+f2/time format */
-		} else if (sscanf(s, "%d+%d", &freq1, &freq2) == 2) {
+		} else if (sscanf(s, "%30d+%30d", &freq1, &freq2) == 2) {
 			/* f1+f2 format */
 			time = 0;
-		} else if (sscanf(s, "%d*%d/%d", &freq1, &freq2, &time) == 3) {
+		} else if (sscanf(s, "%30d*%30d/%30d", &freq1, &freq2, &time) == 3) {
 			/* f1*f2/time format */
 			modulate = 1;
-		} else if (sscanf(s, "%d*%d", &freq1, &freq2) == 2) {
+		} else if (sscanf(s, "%30d*%30d", &freq1, &freq2) == 2) {
 			/* f1*f2 format */
 			time = 0;
 			modulate = 1;
-		} else if (sscanf(s, "%d/%d", &freq1, &time) == 2) {
+		} else if (sscanf(s, "%30d/%30d", &freq1, &time) == 2) {
 			/* f1/time format */
 			freq2 = 0;
-		} else if (sscanf(s, "%d", &freq1) == 1) {
+		} else if (sscanf(s, "%30d", &freq1) == 1) {
 			/* f1 format */
 			freq2 = 0;
 			time = 0;
-		} else if (sscanf(s, "M%d+M%d/%d", &freq1, &freq2, &time) == 3) {
+		} else if (sscanf(s, "M%30d+M%30d/%30d", &freq1, &freq2, &time) == 3) {
 			/* Mf1+Mf2/time format */
 			midinote = 1;
-		} else if (sscanf(s, "M%d+M%d", &freq1, &freq2) == 2) {
+		} else if (sscanf(s, "M%30d+M%30d", &freq1, &freq2) == 2) {
 			/* Mf1+Mf2 format */
 			time = 0;
 			midinote = 1;
-		} else if (sscanf(s, "M%d*M%d/%d", &freq1, &freq2, &time) == 3) {
+		} else if (sscanf(s, "M%30d*M%30d/%30d", &freq1, &freq2, &time) == 3) {
 			/* Mf1*Mf2/time format */
 			modulate = 1;
 			midinote = 1;
-		} else if (sscanf(s, "M%d*M%d", &freq1, &freq2) == 2) {
+		} else if (sscanf(s, "M%30d*M%30d", &freq1, &freq2) == 2) {
 			/* Mf1*Mf2 format */
 			time = 0;
 			modulate = 1;
 			midinote = 1;
-		} else if (sscanf(s, "M%d/%d", &freq1, &time) == 2) {
+		} else if (sscanf(s, "M%30d/%30d", &freq1, &time) == 2) {
 			/* Mf1/time format */
 			freq2 = -1;
 			midinote = 1;
-		} else if (sscanf(s, "M%d", &freq1) == 1) {
+		} else if (sscanf(s, "M%30d", &freq1) == 1) {
 			/* Mf1 format */
 			freq2 = -1;
 			time = 0;
@@ -373,13 +373,10 @@ struct tone_zone *ast_get_indication_zone(const char *country)
 	struct tone_zone *tz;
 	int alias_loop = 0;
 
-	/* we need some tonezone, pick the first */
-	if (country == NULL && current_tonezone)
-		return current_tonezone;	/* default country? */
-	if (country == NULL && tone_zones)
-		return tone_zones;		/* any country? */
-	if (country == NULL)
-		return 0;	/* not a single country insight */
+	if (ast_strlen_zero(country)) {
+		/* No country specified?  Return the default or the first in the list */
+		return current_tonezone ? current_tonezone : tone_zones;
+	}
 
 	ast_mutex_lock(&tzlock);
 	do {

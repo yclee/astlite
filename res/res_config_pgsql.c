@@ -28,7 +28,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 96318 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 182808 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -204,8 +204,7 @@ static struct ast_variable *realtime_pgsql(const char *database, const char *tab
 		}
 		ast_free(fieldnames);
 	} else {
-		ast_log(LOG_WARNING,
-				"Postgresql RealTime: Could not find any rows in table %s.\n", table);
+		ast_log(LOG_DEBUG, "Postgresql RealTime: Could not find any rows in table %s.\n", table);
 	}
 
 	ast_mutex_unlock(&pgsql_lock);
@@ -836,7 +835,7 @@ static int realtime_pgsql_status(int fd, int argc, char **argv)
 }
 
 /* needs usecount semantics defined */
-AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_GLOBAL_SYMBOLS, "PostgreSQL RealTime Configuration Driver",
+AST_MODULE_INFO(ASTERISK_GPL_KEY, AST_MODFLAG_DEFAULT, "PostgreSQL RealTime Configuration Driver",
 		.load = load_module,
 		.unload = unload_module,
 		.reload = reload

@@ -58,7 +58,7 @@ struct tone_zone {
 /* set the default tone country */
 int ast_set_indication_country(const char *country);
 
-/* locate tone_zone, given the country. if country == NULL, use the default country */
+/* locate ind_tone_zone, given the country. if country == NULL, use the default country */
 struct tone_zone *ast_get_indication_zone(const char *country);
 /* locate a tone_zone_sound, given the tone_zone. if tone_zone == NULL, use the default tone_zone */
 struct tone_zone_sound *ast_get_indication_tone(const struct tone_zone *zone, const char *indication);

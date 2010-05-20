@@ -31,7 +31,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 110880 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 228418 $")
 
 #include <fcntl.h>
 #include <stdlib.h>
@@ -126,6 +126,11 @@ static int ilbctolin_framein(struct ast_trans_pvt *pvt, struct ast_frame *f)
 	int x,i;
 	int16_t *dst = (int16_t *)pvt->outbuf;
 	float tmpf[ILBC_SAMPLES];
+
+	if (!f->data && f->datalen) {
+		ast_log(LOG_DEBUG, "issue 16070, ILIB ERROR. data = NULL datalen = %d src = %s\n", f->datalen, f->src ? f->src : "no src set");
+		f->datalen = 0;
+	}
 
 	if (f->datalen == 0) { /* native PLC, set fake f->datalen and clear plc_mode */
 		f->datalen = ILBC_FRAME_LEN;

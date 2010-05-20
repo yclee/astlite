@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------*\
-  $Id: poll.c 40722 2006-08-21 02:11:39Z kpfleming $
+  $Id: poll.c 182810 2009-03-18 02:09:13Z russell $
 
   NAME
 
@@ -71,6 +71,8 @@
 				 Includes
 \*---------------------------------------------------------------------------*/
 
+#include "asterisk.h"
+
 #include <unistd.h>			     /* standard Unix definitions */
 #include <sys/types.h>                       /* system types */
 #include <sys/time.h>                        /* time definitions */
@@ -78,6 +80,8 @@
 #include <string.h>                          /* string functions */
 
 #include "asterisk/poll-compat.h"                            /* this package */
+
+#ifdef AST_POLL_COMPAT
 
 /*---------------------------------------------------------------------------*\
 				  Macros
@@ -87,7 +91,6 @@
 #define MAX(a,b)	((a) > (b) ? (a) : (b))
 #endif
 
-
 /*---------------------------------------------------------------------------*\
 			     Private Functions
 \*---------------------------------------------------------------------------*/
@@ -209,7 +212,7 @@ static struct timeval *map_timeout
 
     return pResult;
 }
-
+
 static void map_select_results
 #if __STDC__ > 0
 			 (struct pollfd *pArray,
@@ -251,41 +254,31 @@ static void map_select_results
 
     return;
 }
-
+
 /*---------------------------------------------------------------------------*\
 			     Public Functions
 \*---------------------------------------------------------------------------*/
 
-int poll
-
-#if __STDC__ > 0
-	(struct pollfd *pArray, unsigned long n_fds, int timeout)
-#else
-	(pArray, n_fds, timeout)
-	 struct	       pollfd *pArray;
-	 unsigned long n_fds;
-	 int	       timeout;
-#endif
-
+int ast_internal_poll(struct pollfd *pArray, unsigned long n_fds, int timeout)
 {
     fd_set  read_descs;                          /* input file descs */
     fd_set  write_descs;                         /* output file descs */
     fd_set  except_descs;                        /* exception descs */
     struct  timeval stime;                       /* select() timeout value */
     int	    ready_descriptors;                   /* function result */
-    int	    max_fd;                              /* maximum fd value */
+    int	    max_fd = 0;                          /* maximum fd value */
     struct  timeval *pTimeout;                   /* actually passed */
 
     FD_ZERO (&read_descs);
     FD_ZERO (&write_descs);
     FD_ZERO (&except_descs);
 
-    assert (pArray != (struct pollfd *) NULL);
-
     /* Map the poll() file descriptor list in the select() data structures. */
 
-    max_fd = map_poll_spec (pArray, n_fds,
-			    &read_descs, &write_descs, &except_descs);
+	if (pArray) {
+    	max_fd = map_poll_spec (pArray, n_fds,
+				&read_descs, &write_descs, &except_descs);
+	}
 
     /* Map the poll() timeout value in the select() timeout structure. */
 
@@ -304,3 +297,5 @@ int poll
 
     return ready_descriptors;
 }
+
+#endif /* AST_POLL_COMPAT */

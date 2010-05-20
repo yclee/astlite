@@ -50,6 +50,7 @@ includedir	=	@includedir@
 libdir		=	@libdir@
 mandir		=	@mandir@
 docdir		=	@docdir@
+datarootdir =	@datarootdir@
 BUILDROOT	=	$(DSTROOT)
 
 

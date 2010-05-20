@@ -29,7 +29,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 97645 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 117507 $")
 
 #include <sys/types.h>
 #include <stdlib.h>
@@ -139,6 +139,10 @@ static void __verboser(const char *_stuff)
 
 static void verboser(const char *stuff) 
 {
+	if (*stuff == 127) {
+		stuff++;
+	}
+
 	ast_mutex_lock(&verb_lock);
 	/* Lock appropriately if we're really being called in verbose mode */
 	__verboser(stuff);

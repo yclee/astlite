@@ -166,7 +166,16 @@ far_alerting=no
 
 
 ;
-; here you can define which bearers should be allowed
+; Here you can list which bearer capabilities should be allowed:
+;   all                  - allow any bearer capability
+;   speech               - allow speech
+;   3_1khz               - allow 3.1KHz audio
+;   digital_unrestricted - allow unrestricted digital
+;   digital_restricted   - allow restricted digital
+;   video                - allow video
+;
+; Example:
+; allowed_bearers=speech,3_1khz
 ;
 allowed_bearers=all
 
@@ -234,10 +243,11 @@ need_more_infos=no
 ;
 nttimeout=no
 
-; set the method to use for channel selection:
-;   standard    - always choose the first free channel with the lowest number
-;   round_robin - use the round robin algorithm to select a channel. use this
-;                 if you want to balance your load.
+; Set the method to use for channel selection:
+;   standard     - Use the first free channel starting from the lowest number.
+;   standard_dec - Use the first free channel starting from the highest number.
+;   round_robin  - Use the round robin algorithm to select a channel. Use this
+;                  if you want to balance your load.
 ;
 ; default value: standard
 ;
@@ -336,18 +346,18 @@ nodialtone=no
 
 ;
 ; these are the exact isdn screening and presentation indicators
-; if -1 is given for both values the presentation indicators are used
+; if -1 is given for either value the presentation indicators are used
 ; from asterisks SetCallerPres application.
-; s=0, p=0 -> callerid presented not screened
-; s=1, p=1 -> callerid presented but screened (the remote end does not see it!)
+; s=0, p=0 -> callerid presented
+; s=1, p=1 -> callerid restricted (the remote end does not see it!)
 ; 
 ; default values s=-1, p=-1
 presentation=-1
 screen=-1
 
-; this enables echocancellation, with the given number of taps
-; be aware, move this setting only to outgoing portgroups!
-; A value of zero turns echocancellation off.
+; This enables echo cancellation with the given number of taps.
+; Be aware: Move this setting only to outgoing portgroups!
+; A value of zero turns echo cancellation off.
 ;
 ; possible values are: 0,32,64,128,256,yes(=128),no(=0)
 ;

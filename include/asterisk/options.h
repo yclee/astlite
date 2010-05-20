@@ -29,6 +29,7 @@ extern "C" {
 
 #define AST_CACHE_DIR_LEN 	512
 #define AST_FILENAME_MAX	80
+#define AST_CHANNEL_NAME	80
 
 /*! \ingroup main_options */
 enum ast_option_flags {
@@ -121,7 +122,13 @@ extern pid_t ast_mainpid;
 
 extern char record_cache_dir[AST_CACHE_DIR_LEN];
 extern char debug_filename[AST_FILENAME_MAX];
-
+extern const char *dahdi_chan_name;
+extern const size_t *dahdi_chan_name_len;
+extern const enum dahdi_chan_modes {
+	CHAN_ZAP_MODE,
+	CHAN_DAHDI_PLUS_ZAP_MODE,
+} *dahdi_chan_mode;
+	
 extern int ast_language_is_prefix;
 
 #if defined(__cplusplus) || defined(c_plusplus)

@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109838 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 237697 $")
 
 #include <ctype.h>
 #include <string.h>
@@ -228,68 +228,6 @@ struct hostent *ast_gethostbyname(const char *host, struct ast_hostent *hp)
 	return &hp->hp;
 }
 
-
-
-AST_MUTEX_DEFINE_STATIC(test_lock);
-AST_MUTEX_DEFINE_STATIC(test_lock2);
-static pthread_t test_thread; 
-static int lock_count = 0;
-static int test_errors = 0;
-
-/*! \brief This is a regression test for recursive mutexes.
-   test_for_thread_safety() will return 0 if recursive mutex locks are
-   working properly, and non-zero if they are not working properly. */
-static void *test_thread_body(void *data) 
-{ 
-	ast_mutex_lock(&test_lock);
-	lock_count += 10;
-	if (lock_count != 10) 
-		test_errors++;
-	ast_mutex_lock(&test_lock);
-	lock_count += 10;
-	if (lock_count != 20) 
-		test_errors++;
-	ast_mutex_lock(&test_lock2);
-	ast_mutex_unlock(&test_lock);
-	lock_count -= 10;
-	if (lock_count != 10) 
-		test_errors++;
-	ast_mutex_unlock(&test_lock);
-	lock_count -= 10;
-	ast_mutex_unlock(&test_lock2);
-	if (lock_count != 0) 
-		test_errors++;
-	return NULL;
-} 
-
-int test_for_thread_safety(void)
-{ 
-	ast_mutex_lock(&test_lock2);
-	ast_mutex_lock(&test_lock);
-	lock_count += 1;
-	ast_mutex_lock(&test_lock);
-	lock_count += 1;
-	ast_pthread_create(&test_thread, NULL, test_thread_body, NULL); 
-	usleep(100);
-	if (lock_count != 2) 
-		test_errors++;
-	ast_mutex_unlock(&test_lock);
-	lock_count -= 1;
-	usleep(100); 
-	if (lock_count != 1) 
-		test_errors++;
-	ast_mutex_unlock(&test_lock);
-	lock_count -= 1;
-	if (lock_count != 0) 
-		test_errors++;
-	ast_mutex_unlock(&test_lock2);
-	usleep(100);
-	if (lock_count != 0) 
-		test_errors++;
-	pthread_join(test_thread, NULL);
-	return(test_errors);          /* return 0 on success. */
-}
-
 /*! \brief Produce 32 char MD5 hash of value. */
 void ast_md5_hash(char *output, char *input)
 {
@@ -331,7 +269,7 @@ int ast_base64decode(unsigned char *dst, const char *src, int max)
 	unsigned int byte = 0;
 	unsigned int bits = 0;
 	int incnt = 0;
-	while(*src && (cnt < max)) {
+	while(*src && *src != '=' && (cnt < max)) {
 		/* Shift in 6 bits of input */
 		byte <<= 6;
 		byte |= (b2a[(int)(*src)]) & 0x3f;
@@ -446,7 +384,7 @@ static void base64_init(void)
 */
 char *ast_uri_encode(const char *string, char *outbuf, int buflen, int doreserved) 
 {
-	char *reserved = ";/?:@&=+$, ";	/* Reserved chars */
+	char *reserved = ";/?:@&=+$,# ";	/* Reserved chars */
 
  	const char *ptr  = string;	/* Start with the string */
 	char *out = NULL;
@@ -456,7 +394,7 @@ char *ast_uri_encode(const char *string, char *outbuf, int buflen, int doreserve
 
 	/* If there's no characters to convert, just go through and don't do anything */
 	while (*ptr) {
-		if (((unsigned char) *ptr) > 127 || (doreserved && strchr(reserved, *ptr)) ) {
+		if ((*ptr < 32) || (doreserved && strchr(reserved, *ptr))) {
 			/* Oops, we need to start working here */
 			if (!buf) {
 				buf = outbuf;
@@ -569,10 +507,30 @@ static AST_LIST_HEAD_NOLOCK_STATIC(lock_infos, thr_lock_info);
 static void lock_info_destroy(void *data)
 {
 	struct thr_lock_info *lock_info = data;
+	int i;
 
 	pthread_mutex_lock(&lock_infos_lock.mutex);
 	AST_LIST_REMOVE(&lock_infos, lock_info, entry);
 	pthread_mutex_unlock(&lock_infos_lock.mutex);
+
+
+	for (i = 0; i < lock_info->num_locks; i++) {
+		if (lock_info->locks[i].pending == -1) {
+			/* This just means that the last lock this thread went for was by
+			 * using trylock, and it failed.  This is fine. */
+			break;
+		}
+
+		ast_log(LOG_ERROR, 
+			"Thread '%s' still has a lock! - '%s' (%p) from '%s' in %s:%d!\n", 
+			lock_info->thread_name,
+			lock_info->locks[i].lock_name,
+			lock_info->locks[i].lock_addr,
+			lock_info->locks[i].func,
+			lock_info->locks[i].file,
+			lock_info->locks[i].line_num
+		);
+	}
 
 	pthread_mutex_destroy(&lock_info->lock);
 	free((void *) lock_info->thread_name);
@@ -662,6 +620,37 @@ void ast_mark_lock_failed(void *lock_addr)
 	pthread_mutex_unlock(&lock_info->lock);
 }
 
+int ast_find_lock_info(void *lock_addr, char *filename, size_t filename_size, int *lineno, char *func, size_t func_size, char *mutex_name, size_t mutex_name_size)
+{
+	struct thr_lock_info *lock_info;
+	int i = 0;
+
+	if (!(lock_info = ast_threadstorage_get(&thread_lock_info, sizeof(*lock_info))))
+		return -1;
+
+	pthread_mutex_lock(&lock_info->lock);
+
+	for (i = lock_info->num_locks - 1; i >= 0; i--) {
+		if (lock_info->locks[i].lock_addr == lock_addr)
+			break;
+	}
+
+	if (i == -1) {
+		/* Lock not found :( */
+		pthread_mutex_unlock(&lock_info->lock);
+		return -1;
+	}
+
+	ast_copy_string(filename, lock_info->locks[i].file, filename_size);
+	*lineno = lock_info->locks[i].line_num;
+	ast_copy_string(func, lock_info->locks[i].func, func_size);
+	ast_copy_string(mutex_name, lock_info->locks[i].lock_name, mutex_name_size);
+
+	pthread_mutex_unlock(&lock_info->lock);
+
+	return 0;
+}
+
 void ast_remove_lock_info(void *lock_addr)
 {
 	struct thr_lock_info *lock_info;
@@ -736,46 +725,48 @@ static int handle_show_locks(int fd, int argc, char *argv[])
 	pthread_mutex_lock(&lock_infos_lock.mutex);
 	AST_LIST_TRAVERSE(&lock_infos, lock_info, entry) {
 		int i;
-		ast_dynamic_str_append(&str, 0, "=== Thread ID: %u (%s)\n", (int) lock_info->thread_id,
-			lock_info->thread_name);
-		pthread_mutex_lock(&lock_info->lock);
-		for (i = 0; str && i < lock_info->num_locks; i++) {
-			int j;
-			ast_mutex_t *lock;
+		if (lock_info->num_locks) {
+			ast_dynamic_str_append(&str, 0, "=== Thread ID: %ld (%s)\n", (long) lock_info->thread_id,
+				lock_info->thread_name);
+			pthread_mutex_lock(&lock_info->lock);
+			for (i = 0; str && i < lock_info->num_locks; i++) {
+				int j;
+				ast_mutex_t *lock;
 
-			ast_dynamic_str_append(&str, 0, "=== ---> %sLock #%d (%s): %s %d %s %s %p (%d)\n", 
-				lock_info->locks[i].pending > 0 ? "Waiting for " : 
-					lock_info->locks[i].pending < 0 ? "Tried and failed to get " : "", i,
-				lock_info->locks[i].file, 
-				locktype2str(lock_info->locks[i].type),
-				lock_info->locks[i].line_num,
-				lock_info->locks[i].func, lock_info->locks[i].lock_name,
-				lock_info->locks[i].lock_addr, 
-				lock_info->locks[i].times_locked);
+				ast_dynamic_str_append(&str, 0, "=== ---> %sLock #%d (%s): %s %d %s %s %p (%d)\n", 
+					lock_info->locks[i].pending > 0 ? "Waiting for " : 
+						lock_info->locks[i].pending < 0 ? "Tried and failed to get " : "", i,
+					lock_info->locks[i].file, 
+					locktype2str(lock_info->locks[i].type),
+					lock_info->locks[i].line_num,
+					lock_info->locks[i].func, lock_info->locks[i].lock_name,
+					lock_info->locks[i].lock_addr, 
+					lock_info->locks[i].times_locked);
 
-			if (!lock_info->locks[i].pending || lock_info->locks[i].pending == -1)
-				continue;
+				if (!lock_info->locks[i].pending || lock_info->locks[i].pending == -1)
+					continue;
 
-			/* We only have further details for mutexes right now */
-			if (lock_info->locks[i].type != AST_MUTEX)
-				continue;
+				/* We only have further details for mutexes right now */
+				if (lock_info->locks[i].type != AST_MUTEX)
+					continue;
 
-			lock = lock_info->locks[i].lock_addr;
+				lock = lock_info->locks[i].lock_addr;
 
-			ast_reentrancy_lock(lock);
-			for (j = 0; str && j < lock->reentrancy; j++) {
-				ast_dynamic_str_append(&str, 0, "=== --- ---> Locked Here: %s line %d (%s)\n",
-					lock->file[j], lock->lineno[j], lock->func[j]);
+				ast_reentrancy_lock(lock);
+				for (j = 0; str && j < lock->reentrancy; j++) {
+					ast_dynamic_str_append(&str, 0, "=== --- ---> Locked Here: %s line %d (%s)\n",
+						lock->file[j], lock->lineno[j], lock->func[j]);
+				}
+				ast_reentrancy_unlock(lock);	
 			}
-			ast_reentrancy_unlock(lock);	
+			pthread_mutex_unlock(&lock_info->lock);
+			if (!str)
+				break;
+			ast_dynamic_str_append(&str, 0, "=== -------------------------------------------------------------------\n"
+			            "===\n");
+			if (!str)
+				break;
 		}
-		pthread_mutex_unlock(&lock_info->lock);
-		if (!str)
-			break;
-		ast_dynamic_str_append(&str, 0, "=== -------------------------------------------------------------------\n"
-		            "===\n");
-		if (!str)
-			break;
 	}
 	pthread_mutex_unlock(&lock_infos_lock.mutex);
 
@@ -907,8 +898,11 @@ int ast_pthread_create_stack(pthread_t *thread, pthread_attr_t *attr, void *(*st
 		a->start_routine = start_routine;
 		a->data = data;
 		start_routine = dummy_start;
-		asprintf(&a->name, "%-20s started at [%5d] %s %s()",
-			 start_fn, line, file, caller);
+		if (asprintf(&a->name, "%-20s started at [%5d] %s %s()",
+			     start_fn, line, file, caller) < 0) {
+			ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+			a->name = NULL;
+		}
 		data = a;
 	}
 #endif /* !LOW_MEMORY */
@@ -922,34 +916,78 @@ int ast_wait_for_input(int fd, int ms)
 	memset(pfd, 0, sizeof(pfd));
 	pfd[0].fd = fd;
 	pfd[0].events = POLLIN|POLLPRI;
-	return poll(pfd, 1, ms);
+	return ast_poll(pfd, 1, ms);
 }
 
 int ast_carefulwrite(int fd, char *s, int len, int timeoutms) 
 {
-	/* Try to write string, but wait no more than ms milliseconds
-	   before timing out */
+	struct timeval start = ast_tvnow();
 	int res = 0;
-	struct pollfd fds[1];
+	int elapsed = 0;
+
 	while (len) {
+		struct pollfd pfd = {
+			.fd = fd,
+			.events = POLLOUT,
+		};
+
+		/* poll() until the fd is writable without blocking */
+		while ((res = ast_poll(&pfd, 1, timeoutms - elapsed)) <= 0) {
+			if (res == 0) {
+				/* timed out. */
+				if (option_debug) {
+					ast_log(LOG_DEBUG, "Timed out trying to write\n");
+				}
+				return -1;
+			} else if (res == -1) {
+				/* poll() returned an error, check to see if it was fatal */
+
+				if (errno == EINTR || errno == EAGAIN) {
+					elapsed = ast_tvdiff_ms(ast_tvnow(), start);
+					if (elapsed > timeoutms) {
+						/* We've taken too long to write 
+						 * This is only an error condition if we haven't finished writing. */
+						res = len ? -1 : 0;
+						break;
+					}
+					/* This was an acceptable error, go back into poll() */
+					continue;
+				}
+
+				/* Fatal error, bail. */
+				ast_log(LOG_ERROR, "poll returned error: %s\n", strerror(errno));
+
+				return -1;
+			}
+		}
+
 		res = write(fd, s, len);
-		if ((res < 0) && (errno != EAGAIN)) {
+
+		if (res < 0 && errno != EAGAIN && errno != EINTR) {
+			/* fatal error from write() */
+			ast_log(LOG_ERROR, "write() returned error: %s\n", strerror(errno));
 			return -1;
 		}
-		if (res < 0)
+
+		if (res < 0) {
+			/* It was an acceptable error */
 			res = 0;
+		}
+
+		/* Update how much data we have left to write */
 		len -= res;
 		s += res;
 		res = 0;
-		if (len) {
-			fds[0].fd = fd;
-			fds[0].events = POLLOUT;
-			/* Wait until writable again */
-			res = poll(fds, 1, timeoutms);
-			if (res < 1)
-				return -1;
+
+		elapsed = ast_tvdiff_ms(ast_tvnow(), start);
+		if (elapsed > timeoutms) {
+			/* We've taken too long to write 
+			 * This is only an error condition if we haven't finished writing. */
+			res = len ? -1 : 0;
+			break;
 		}
 	}
+
 	return res;
 }
 
@@ -1216,30 +1254,57 @@ ast_string_field __ast_string_field_alloc_space(struct ast_string_field_mgr *mgr
 }
 
 void __ast_string_field_index_build_va(struct ast_string_field_mgr *mgr,
-				    ast_string_field *fields, int num_fields,
-				    int index, const char *format, va_list ap1, va_list ap2)
+				       ast_string_field *fields, int num_fields,
+				       int index, const char *format, va_list ap1, va_list ap2)
 {
 	size_t needed;
+	size_t available;
+	char *target;
 
-	needed = vsnprintf(mgr->pool->base + mgr->used, mgr->space, format, ap1) + 1;
+	/* if the field already has space allocated, try to reuse it;
+	   otherwise, use the empty space at the end of the current
+	   pool
+	*/
+	if (fields[index][0] != '\0') {
+		target = (char *) fields[index];
+		available = strlen(fields[index]) + 1;
+	} else {
+		target = mgr->pool->base + mgr->used;
+		available = mgr->space;
+	}
+
+	needed = vsnprintf(target, available, format, ap1) + 1;
 
 	va_end(ap1);
 
-	if (needed > mgr->space) {
-		size_t new_size = mgr->size * 2;
+	if (needed > available) {
+		/* if the space needed can be satisfied by using the current
+		   pool (which could only occur if we tried to use the field's
+		   allocated space and failed), then use that space; otherwise
+		   allocate a new pool
+		*/
+		if (needed <= mgr->space) {
+			target = mgr->pool->base + mgr->used;
+		} else {
+			size_t new_size = mgr->size * 2;
 
-		while (new_size < needed)
-			new_size *= 2;
+			while (new_size < needed)
+				new_size *= 2;
+			
+			if (add_string_pool(mgr, new_size))
+				return;
+			
+			target = mgr->pool->base + mgr->used;
+		}
 
-		if (add_string_pool(mgr, new_size))
-			return;
-
-		vsprintf(mgr->pool->base + mgr->used, format, ap2);
+		vsprintf(target, format, ap2);
 	}
 
-	fields[index] = mgr->pool->base + mgr->used;
-	mgr->used += needed;
-	mgr->space -= needed;
+	if (fields[index] != target) {
+		fields[index] = target;
+		mgr->used += needed;
+		mgr->space -= needed;
+	}
 }
 
 void __ast_string_field_index_build(struct ast_string_field_mgr *mgr,
@@ -1286,7 +1351,7 @@ int ast_get_time_t(const char *src, time_t *dst, time_t _default, int *consumed)
 		return -1;
 
 	/* only integer at the moment, but one day we could accept more formats */
-	if (sscanf(src, "%ld%n", &t, &scanned) == 1) {
+	if (sscanf(src, "%30ld%n", &t, &scanned) == 1) {
 		*dst = t;
 		if (consumed)
 			*consumed = scanned;
@@ -1354,9 +1419,25 @@ int ast_utils_init(void)
 {
 	base64_init();
 #ifdef DEBUG_THREADS
+#if !defined(LOW_MEMORY)
 	ast_cli_register_multiple(utils_cli, sizeof(utils_cli) / sizeof(utils_cli[0]));
+#endif
 #endif
 	return 0;
 }
 
+#ifndef __AST_DEBUG_MALLOC
+int _ast_asprintf(char **ret, const char *file, int lineno, const char *func, const char *fmt, ...)
+{
+	int res;
+	va_list ap;
 
+	va_start(ap, fmt);
+	if ((res = vasprintf(ret, fmt, ap)) == -1) {
+		MALLOC_FAILURE_MSG;
+	}
+	va_end(ap);
+
+	return res;
+}
+#endif

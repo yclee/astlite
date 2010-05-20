@@ -30,7 +30,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98372 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 153823 $")
 
 #include <sys/types.h>
 #include <stdio.h>
@@ -167,12 +167,12 @@ static char *static_callback(struct sockaddr_in *req, const char *uri, struct as
 out404:
 	*status = 404;
 	*title = strdup("Not Found");
-	return ast_http_error(404, "Not Found", NULL, "Nothing to see here.  Move along.");
+	return ast_http_error(404, "Not Found", NULL, "The requested URL was not found on this server.");
 
 out403:
 	*status = 403;
 	*title = strdup("Access Denied");
-	return ast_http_error(403, "Access Denied", NULL, "Sorry, I cannot let you do that, Dave.");
+	return ast_http_error(403, "Access Denied", NULL, "You do not have permission to access the requested URL.");
 }
 
 
@@ -231,20 +231,23 @@ static struct ast_http_uri staticuri = {
 char *ast_http_error(int status, const char *title, const char *extra_header, const char *text)
 {
 	char *c = NULL;
-	asprintf(&c,
-		"Content-type: text/html\r\n"
-		"%s"
-		"\r\n"
-		"<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\r\n"
-		"<html><head>\r\n"
-		"<title>%d %s</title>\r\n"
-		"</head><body>\r\n"
-		"<h1>%s</h1>\r\n"
-		"<p>%s</p>\r\n"
-		"<hr />\r\n"
-		"<address>Asterisk Server</address>\r\n"
-		"</body></html>\r\n",
-			(extra_header ? extra_header : ""), status, title, title, text);
+	if (asprintf(&c,
+		     "Content-type: text/html\r\n"
+		     "%s"
+		     "\r\n"
+		     "<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\r\n"
+		     "<html><head>\r\n"
+		     "<title>%d %s</title>\r\n"
+		     "</head><body>\r\n"
+		     "<h1>%s</h1>\r\n"
+		     "<p>%s</p>\r\n"
+		     "<hr />\r\n"
+		     "<address>Asterisk Server</address>\r\n"
+		     "</body></html>\r\n",
+		     (extra_header ? extra_header : ""), status, title, title, text) < 0) {
+		ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+		c = NULL;
+	}
 	return c;
 }
 
@@ -367,7 +370,7 @@ static char *handle_uri(struct sockaddr_in *sin, char *uri, int *status,
 		ast_rwlock_unlock(&uris_lock);
 	} else if (ast_strlen_zero(uri) && ast_strlen_zero(prefix)) {
 		/* Special case: If no prefix, and no URI, send to /static/index.html */
-		c = ast_http_error(302, "Moved Temporarily", "Location: /static/index.html\r\n", "This is not the page you are looking for...");
+		c = ast_http_error(302, "Moved Temporarily", "Location: /static/index.html\r\n", "Redirecting to /static/index.html.");
 		*status = 302;
 		*title = strdup("Moved Temporarily");
 	} else {
@@ -379,15 +382,51 @@ static char *handle_uri(struct sockaddr_in *sin, char *uri, int *status,
 	return c;
 }
 
+static struct ast_variable *parse_cookies(char *cookies)
+{
+	char *cur;
+	struct ast_variable *vars = NULL, *var;
+
+	/* Skip Cookie: */
+	cookies += 8;
+
+	while ((cur = strsep(&cookies, ";"))) {
+		char *name, *val;
+		
+		name = val = cur;
+		strsep(&val, "=");
+
+		if (ast_strlen_zero(name) || ast_strlen_zero(val)) {
+			continue;
+		}
+
+		name = ast_strip(name);
+		val = ast_strip_quoted(val, "\"", "\"");
+
+		if (ast_strlen_zero(name) || ast_strlen_zero(val)) {
+			continue;
+		}
+
+		if (option_debug) {
+			ast_log(LOG_DEBUG, "mmm ... cookie!  Name: '%s'  Value: '%s'\n", name, val);
+		}
+
+		var = ast_variable_new(name, val);
+		var->next = vars;
+		vars = var;
+	}
+
+	return vars;
+}
+
 static void *ast_httpd_helper_thread(void *data)
 {
 	char buf[4096];
 	char cookie[4096];
 	char timebuf[256];
 	struct ast_http_server_instance *ser = data;
-	struct ast_variable *var, *prev=NULL, *vars=NULL;
+	struct ast_variable *vars = NULL;
 	char *uri, *c, *title=NULL;
-	char *vname, *vval;
 	int status = 200, contentlength = 0;
 	time_t t;
 	unsigned int static_content = 0;
@@ -423,52 +462,7 @@ static void *ast_httpd_helper_thread(void *data)
 			if (ast_strlen_zero(cookie))
 				break;
 			if (!strncasecmp(cookie, "Cookie: ", 8)) {
-
-				/* TODO - The cookie parsing code below seems to work   
-				   in IE6 and FireFox 1.5.  However, it is not entirely 
-				   correct, and therefore may not work in all           
-				   circumstances.		                        
-				      For more details see RFC 2109 and RFC 2965        */
-			
-				/* FireFox cookie strings look like:                    
-				     Cookie: mansession_id="********"                   
-				   InternetExplorer's look like:                        
-				     Cookie: $Version="1"; mansession_id="********"     */
-				
-				/* If we got a FireFox cookie string, the name's right  
-				    after "Cookie: "                                    */
-                                vname = cookie + 8;
-				
-				/* If we got an IE cookie string, we need to skip to    
-				    past the version to get to the name                 */
-				if (*vname == '$') {
-					vname = strchr(vname, ';');
-					if (vname) { 
-						vname++;
-						if (*vname == ' ')
-							vname++;
-					}
-				}
-				
-				if (vname) {
-					vval = strchr(vname, '=');
-					if (vval) {
-						/* Ditch the = and the quotes */
-						*vval++ = '\0';
-						if (*vval)
-							vval++;
-						if (strlen(vval))
-							vval[strlen(vval) - 1] = '\0';
-						var = ast_variable_new(vname, vval);
-						if (var) {
-							if (prev)
-								prev->next = var;
-							else
-								vars = var;
-							prev = var;
-						}
-					}
-				}
+				vars = parse_cookies(cookie);
 			}
 		}
 
@@ -505,8 +499,12 @@ static void *ast_httpd_helper_thread(void *data)
 				tmp = strstr(c, "\r\n\r\n");
 				if (tmp) {
 					ast_cli(ser->fd, "Content-length: %d\r\n", contentlength);
-					write(ser->fd, c, (tmp + 4 - c));
-					write(ser->fd, tmp + 4, contentlength);
+					if (write(ser->fd, c, (tmp + 4 - c)) < 0) {
+						ast_log(LOG_WARNING, "write() failed: %s\n", strerror(errno));
+					}
+					if (write(ser->fd, tmp + 4, contentlength) < 0) {
+						ast_log(LOG_WARNING, "write() failed: %s\n", strerror(errno));
+					}
 				}
 			} else
 				ast_cli(ser->fd, "%s", c);

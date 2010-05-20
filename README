@@ -2,7 +2,7 @@ The Asterisk(R) Open Source PBX
 by Mark Spencer <markster@digium.com>
 and the Asterisk.org developer community
 
-Copyright (C) 2001-2006 Digium, Inc.
+Copyright (C) 2001-2009 Digium, Inc.
 and other copyright holders.
 ================================================================
 
@@ -11,7 +11,7 @@ and other copyright holders.
 the security information file (doc/security.txt) before you attempt 
 to configure and run an Asterisk server.
 
-* WHAT IS ASTERISK ?
+* WHAT IS ASTERISK?
   Asterisk is an Open Source PBX and telephony toolkit.  It is, in a
 sense, middleware between Internet and telephony channels on the bottom,
 and Internet and telephony applications at the top.  For more information
@@ -159,7 +159,7 @@ they're used only to help make the configuration file easier to
 understand, and do not affect how it is actually parsed.
 
   Entries of the form 'variable=value' set the value of some parameter in
-asterisk.  For example, in zapata.conf, one might specify:
+asterisk.  For example, in chan_dahdi.conf, one might specify:
 
 	switchtype=national
 

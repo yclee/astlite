@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 102653 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 172517 $")
 
 #include "asterisk/global_datastores.h"
 #include "asterisk/linkedlists.h"
@@ -35,8 +35,9 @@ static void dialed_interface_destroy(void *data)
 	struct ast_dialed_interface *di = NULL;
 	AST_LIST_HEAD(, ast_dialed_interface) *dialed_interface_list = data;
 	
-	if (!dialed_interface_list)
+	if (!dialed_interface_list) {
 		return;
+	}
 
 	AST_LIST_LOCK(dialed_interface_list);
 	while ((di = AST_LIST_REMOVE_HEAD(dialed_interface_list, list)))
@@ -53,11 +54,13 @@ static void *dialed_interface_duplicate(void *data)
 	AST_LIST_HEAD(, ast_dialed_interface) *old_list;
 	AST_LIST_HEAD(, ast_dialed_interface) *new_list = NULL;
 
-	if(!(old_list = data))
+	if(!(old_list = data)) {
 		return NULL;
+	}
 
-	if(!(new_list = ast_calloc(1, sizeof(*new_list))))
+	if(!(new_list = ast_calloc(1, sizeof(*new_list)))) {
 		return NULL;
+	}
 
 	AST_LIST_HEAD_INIT(new_list);
 	AST_LIST_LOCK(old_list);
@@ -77,7 +80,7 @@ static void *dialed_interface_duplicate(void *data)
 }
 
 const struct ast_datastore_info dialed_interface_info = {
-	.type ="dialed-interface",
+	.type = "dialed-interface",
 	.destroy = dialed_interface_destroy,
 	.duplicate = dialed_interface_duplicate,
 };

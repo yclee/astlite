@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 111280 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 224931 $")
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -44,11 +44,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 111280 $")
 #include "asterisk/threadstorage.h"
 #include "asterisk/linkedlists.h"
 #include "asterisk/translate.h"
-
-#ifdef TRACE_FRAMES
-static int headers;
-static AST_LIST_HEAD_STATIC(headerlist, ast_frame);
-#endif
+#include "asterisk/dsp.h"
+#include "asterisk/file.h"
 
 #if !defined(LOW_MEMORY)
 static void frame_cache_cleanup(void *data);
@@ -91,10 +88,9 @@ enum frame_type {
 struct ast_smoother {
 	int size;
 	int format;
-	int readdata;
-	int optimizablestream;
 	int flags;
 	float samplesperbyte;
+	unsigned int opt_needs_swap:1;
 	struct ast_frame f;
 	struct timeval delivery;
 	char data[SMOOTHER_SIZE];
@@ -137,10 +133,54 @@ static struct ast_format_list AST_FORMAT_LIST[] = {					/*!< Bit number: comment
 
 struct ast_frame ast_null_frame = { AST_FRAME_NULL, };
 
-void ast_smoother_reset(struct ast_smoother *s, int size)
+static int smoother_frame_feed(struct ast_smoother *s, struct ast_frame *f, int swap)
+{
+	if (s->flags & AST_SMOOTHER_FLAG_G729) {
+		if (s->len % 10) {
+			ast_log(LOG_NOTICE, "Dropping extra frame of G.729 since we already have a VAD frame at the end\n");
+			return 0;
+		}
+	}
+	if (swap) {
+		ast_swapcopy_samples(s->data + s->len, f->data, f->samples);
+	} else {
+		memcpy(s->data + s->len, f->data, f->datalen);
+	}
+	/* If either side is empty, reset the delivery time */
+	if (!s->len || ast_tvzero(f->delivery) || ast_tvzero(s->delivery)) {	/* XXX really ? */
+		s->delivery = f->delivery;
+	}
+	s->len += f->datalen;
+
+	return 0;
+}
+
+void ast_smoother_reset(struct ast_smoother *s, int bytes)
 {
 	memset(s, 0, sizeof(*s));
-	s->size = size;
+	s->size = bytes;
+}
+
+void ast_smoother_reconfigure(struct ast_smoother *s, int bytes)
+{
+	/* if there is no change, then nothing to do */
+	if (s->size == bytes) {
+		return;
+	}
+	/* set the new desired output size */
+	s->size = bytes;
+	/* if there is no 'optimized' frame in the smoother,
+	 *   then there is nothing left to do
+	 */
+	if (!s->opt) {
+		return;
+	}
+	/* there is an 'optimized' frame here at the old size,
+	 * but it must now be put into the buffer so the data
+	 * can be extracted at the new size
+	 */
+	smoother_frame_feed(s, s->opt, s->opt_needs_swap);
+	s->opt = NULL;
 }
 
 struct ast_smoother *ast_smoother_new(int size)
@@ -185,33 +225,22 @@ int __ast_smoother_feed(struct ast_smoother *s, struct ast_frame *f, int swap)
 		ast_log(LOG_WARNING, "Out of smoother space\n");
 		return -1;
 	}
-	if (((f->datalen == s->size) || ((f->datalen < 10) && (s->flags & AST_SMOOTHER_FLAG_G729)))
-				 && !s->opt && (f->offset >= AST_MIN_OFFSET)) {
-		if (!s->len) {
-			/* Optimize by sending the frame we just got
-			   on the next read, thus eliminating the douple
-			   copy */
-			if (swap)
-				ast_swapcopy_samples(f->data, f->data, f->samples);
-			s->opt = f;
-			return 0;
-		}
+	if (((f->datalen == s->size) ||
+	     ((f->datalen < 10) && (s->flags & AST_SMOOTHER_FLAG_G729))) &&
+	    !s->opt &&
+	    !s->len &&
+	    (f->offset >= AST_MIN_OFFSET)) {
+		/* Optimize by sending the frame we just got
+		   on the next read, thus eliminating the douple
+		   copy */
+		if (swap)
+			ast_swapcopy_samples(f->data, f->data, f->samples);
+		s->opt = f;
+		s->opt_needs_swap = swap ? 1 : 0;
+		return 0;
 	}
-	if (s->flags & AST_SMOOTHER_FLAG_G729) {
-		if (s->len % 10) {
-			ast_log(LOG_NOTICE, "Dropping extra frame of G.729 since we already have a VAD frame at the end\n");
-			return 0;
-		}
-	}
-	if (swap)
-		ast_swapcopy_samples(s->data+s->len, f->data, f->samples);
-	else
-		memcpy(s->data + s->len, f->data, f->datalen);
-	/* If either side is empty, reset the delivery time */
-	if (!s->len || ast_tvzero(f->delivery) || ast_tvzero(s->delivery))	/* XXX really ? */
-		s->delivery = f->delivery;
-	s->len += f->datalen;
-	return 0;
+
+	return smoother_frame_feed(s, f, swap);
 }
 
 struct ast_frame *ast_smoother_read(struct ast_smoother *s)
@@ -232,7 +261,7 @@ struct ast_frame *ast_smoother_read(struct ast_smoother *s)
 	/* Make sure we have enough data */
 	if (s->len < s->size) {
 		/* Or, if this is a G.729 frame with VAD on it, send it immediately anyway */
-		if (!((s->flags & AST_SMOOTHER_FLAG_G729) && (s->size % 10)))
+		if (!((s->flags & AST_SMOOTHER_FLAG_G729) && (s->len % 10)))
 			return NULL;
 	}
 	len = s->size;
@@ -294,12 +323,6 @@ static struct ast_frame *ast_frame_header_new(void)
 #endif
 
 	f->mallocd_hdr_len = sizeof(*f);
-#ifdef TRACE_FRAMES
-	AST_LIST_LOCK(&headerlist);
-	headers++;
-	AST_LIST_INSERT_HEAD(&headerlist, f, frame_list);
-	AST_LIST_UNLOCK(&headerlist);
-#endif	
 	
 	return f;
 }
@@ -317,11 +340,8 @@ static void frame_cache_cleanup(void *data)
 }
 #endif
 
-void ast_frame_free(struct ast_frame *fr, int cache)
+static void __frame_free(struct ast_frame *fr, int cache)
 {
-	if (ast_test_flag(fr, AST_FRFLAG_FROM_TRANSLATOR))
-		ast_translate_frame_freed(fr);
-
 	if (!fr->mallocd)
 		return;
 
@@ -331,8 +351,8 @@ void ast_frame_free(struct ast_frame *fr, int cache)
 		 * to keep things simple... */
 		struct ast_frame_cache *frames;
 
-		if ((frames = ast_threadstorage_get(&frame_cache, sizeof(*frames))) 
-		    && frames->size < FRAME_CACHE_MAX_SIZE) {
+		if ((frames = ast_threadstorage_get(&frame_cache, sizeof(*frames))) &&
+		    (frames->size < FRAME_CACHE_MAX_SIZE)) {
 			AST_LIST_INSERT_HEAD(&frames->list, fr, frame_list);
 			frames->size++;
 			return;
@@ -346,16 +366,22 @@ void ast_frame_free(struct ast_frame *fr, int cache)
 	}
 	if (fr->mallocd & AST_MALLOCD_SRC) {
 		if (fr->src)
-			free((char *)fr->src);
+			free((void *) fr->src);
 	}
 	if (fr->mallocd & AST_MALLOCD_HDR) {
-#ifdef TRACE_FRAMES
-		AST_LIST_LOCK(&headerlist);
-		headers--;
-		AST_LIST_REMOVE(&headerlist, fr, frame_list);
-		AST_LIST_UNLOCK(&headerlist);
-#endif			
 		free(fr);
+	}
+}
+
+
+void ast_frame_free(struct ast_frame *frame, int cache)
+{
+	struct ast_frame *next;
+
+	for (next = AST_LIST_NEXT(frame, frame_list);
+	     frame;
+	     frame = next, next = frame ? AST_LIST_NEXT(frame, frame_list) : NULL) {
+		__frame_free(frame, cache);
 	}
 }
 
@@ -369,18 +395,29 @@ struct ast_frame *ast_frisolate(struct ast_frame *fr)
 	struct ast_frame *out;
 	void *newdata;
 
-	ast_clear_flag(fr, AST_FRFLAG_FROM_TRANSLATOR);
+	/* if none of the existing frame is malloc'd, let ast_frdup() do it
+	   since it is more efficient
+	*/
+	if (fr->mallocd == 0) {
+		return ast_frdup(fr);
+	}
+
+	/* if everything is already malloc'd, we are done */
+	if ((fr->mallocd & (AST_MALLOCD_HDR | AST_MALLOCD_SRC | AST_MALLOCD_DATA)) ==
+	    (AST_MALLOCD_HDR | AST_MALLOCD_SRC | AST_MALLOCD_DATA)) {
+		return fr;
+	}
 
 	if (!(fr->mallocd & AST_MALLOCD_HDR)) {
 		/* Allocate a new header if needed */
-		if (!(out = ast_frame_header_new()))
+		if (!(out = ast_frame_header_new())) {
 			return NULL;
+		}
 		out->frametype = fr->frametype;
 		out->subclass = fr->subclass;
 		out->datalen = fr->datalen;
 		out->samples = fr->samples;
 		out->offset = fr->offset;
-		out->data = fr->data;
 		/* Copy the timing data */
 		ast_copy_flags(out, fr, AST_FRFLAG_HAS_TIMING_INFO);
 		if (ast_test_flag(fr, AST_FRFLAG_HAS_TIMING_INFO)) {
@@ -388,26 +425,31 @@ struct ast_frame *ast_frisolate(struct ast_frame *fr)
 			out->len = fr->len;
 			out->seqno = fr->seqno;
 		}
-	} else
+	} else {
 		out = fr;
+	}
 	
-	if (!(fr->mallocd & AST_MALLOCD_SRC)) {
-		if (fr->src) {
-			if (!(out->src = ast_strdup(fr->src))) {
-				if (out != fr)
-					free(out);
-				return NULL;
+	if (!(fr->mallocd & AST_MALLOCD_SRC) && fr->src) {
+		if (!(out->src = ast_strdup(fr->src))) {
+			if (out != fr) {
+				free(out);
 			}
+			return NULL;
 		}
-	} else
+	} else {
 		out->src = fr->src;
+		fr->src = NULL;
+		fr->mallocd &= ~AST_MALLOCD_SRC;
+	}
 	
 	if (!(fr->mallocd & AST_MALLOCD_DATA))  {
 		if (!(newdata = ast_malloc(fr->datalen + AST_FRIENDLY_OFFSET))) {
-			if (out->src != fr->src)
+			if (out->src != fr->src) {
 				free((void *) out->src);
-			if (out != fr)
+			}
+			if (out != fr) {
 				free(out);
+			}
 			return NULL;
 		}
 		newdata += AST_FRIENDLY_OFFSET;
@@ -415,6 +457,10 @@ struct ast_frame *ast_frisolate(struct ast_frame *fr)
 		out->datalen = fr->datalen;
 		memcpy(newdata, fr->data, fr->datalen);
 		out->data = newdata;
+	} else {
+		out->data = fr->data;
+		fr->data = NULL;
+		fr->mallocd &= ~AST_MALLOCD_DATA;
 	}
 
 	out->mallocd = AST_MALLOCD_HDR | AST_MALLOCD_SRC | AST_MALLOCD_DATA;
@@ -457,7 +503,7 @@ struct ast_frame *ast_frdup(const struct ast_frame *f)
 				break;
 			}
 		}
-		AST_LIST_TRAVERSE_SAFE_END
+		AST_LIST_TRAVERSE_SAFE_END;
 	}
 #endif
 
@@ -482,9 +528,12 @@ struct ast_frame *ast_frdup(const struct ast_frame *f)
 		memcpy(out->data, f->data, out->datalen);	
 	}
 	if (srclen > 0) {
+		/* This may seem a little strange, but it's to avoid a gcc (4.2.4) compiler warning */
+		char *src;
 		out->src = buf + sizeof(*out) + AST_FRIENDLY_OFFSET + f->datalen;
+		src = (char *) out->src;
 		/* Must have space since we allocated for it */
-		strcpy((char *)out->src, f->src);
+		strcpy(src, f->src);
 	}
 	ast_copy_flags(out, f, AST_FRFLAG_HAS_TIMING_INFO);
 	out->ts = f->ts;
@@ -705,7 +754,7 @@ static int show_codec_n_deprecated(int fd, int argc, char *argv[])
 	if (argc != 3)
 		return RESULT_SHOWUSAGE;
 
-	if (sscanf(argv[2],"%d",&codec) != 1)
+	if (sscanf(argv[2],"%30d",&codec) != 1)
 		return RESULT_SHOWUSAGE;
 
 	for (i = 0; i < 32; i++)
@@ -727,7 +776,7 @@ static int show_codec_n(int fd, int argc, char *argv[])
 	if (argc != 4)
 		return RESULT_SHOWUSAGE;
 
-	if (sscanf(argv[3],"%d",&codec) != 1)
+	if (sscanf(argv[3],"%30d",&codec) != 1)
 		return RESULT_SHOWUSAGE;
 
 	for (i = 0; i < 32; i++)
@@ -927,46 +976,6 @@ void ast_frame_dump(const char *name, struct ast_frame *f, char *prefix)
 }
 
 
-#ifdef TRACE_FRAMES
-static int show_frame_stats_deprecated(int fd, int argc, char *argv[])
-{
-	struct ast_frame *f;
-	int x=1;
-	if (argc != 3)
-		return RESULT_SHOWUSAGE;
-	AST_LIST_LOCK(&headerlist);
-	ast_cli(fd, "     Framer Statistics     \n");
-	ast_cli(fd, "---------------------------\n");
-	ast_cli(fd, "Total allocated headers: %d\n", headers);
-	ast_cli(fd, "Queue Dump:\n");
-	AST_LIST_TRAVERSE(&headerlist, f, frame_list)
-		ast_cli(fd, "%d.  Type %d, subclass %d from %s\n", x++, f->frametype, f->subclass, f->src ? f->src : "<Unknown>");
-	AST_LIST_UNLOCK(&headerlist);
-	return RESULT_SUCCESS;
-}
-
-static int show_frame_stats(int fd, int argc, char *argv[])
-{
-	struct ast_frame *f;
-	int x=1;
-	if (argc != 4)
-		return RESULT_SHOWUSAGE;
-	AST_LIST_LOCK(&headerlist);
-	ast_cli(fd, "     Framer Statistics     \n");
-	ast_cli(fd, "---------------------------\n");
-	ast_cli(fd, "Total allocated headers: %d\n", headers);
-	ast_cli(fd, "Queue Dump:\n");
-	AST_LIST_TRAVERSE(&headerlist, f, frame_list)
-		ast_cli(fd, "%d.  Type %d, subclass %d from %s\n", x++, f->frametype, f->subclass, f->src ? f->src : "<Unknown>");
-	AST_LIST_UNLOCK(&headerlist);
-	return RESULT_SUCCESS;
-}
-
-static char frame_stats_usage[] =
-"Usage: core show frame stats\n"
-"       Displays debugging statistics from framer\n";
-#endif
-
 /* Builtin Asterisk CLI-commands for debugging */
 static struct ast_cli_entry cli_show_codecs = {
 	{ "show", "codecs", NULL },
@@ -993,13 +1002,6 @@ static struct ast_cli_entry cli_show_codec = {
 	show_codec_n_deprecated, NULL,
 	NULL };
 
-#ifdef TRACE_FRAMES
-static struct ast_cli_entry cli_show_frame_stats = {
-	{ "show", "frame", "stats", NULL },
-	show_frame_stats, NULL,
-	NULL };
-#endif
-
 static struct ast_cli_entry my_clis[] = {
 	{ { "core", "show", "codecs", NULL },
 	show_codecs, "Displays a list of codecs",
@@ -1020,12 +1022,6 @@ static struct ast_cli_entry my_clis[] = {
 	{ { "core", "show", "codec", NULL },
 	show_codec_n, "Shows a specific codec",
 	frame_show_codec_n_usage, NULL, &cli_show_codec },
-
-#ifdef TRACE_FRAMES
-	{ { "core", "show", "frame", "stats", NULL },
-	show_frame_stats, "Shows frame statistics",
-	frame_stats_usage, NULL, &cli_show_frame_stats },
-#endif
 };
 
 int init_framer(void)

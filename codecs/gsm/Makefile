@@ -154,7 +154,7 @@ INC	= $(ROOT)/inc
 DEBUG	= -DNDEBUG
 ######### Remove -DNDEBUG to enable assertions.
 
-ASTCFLAGS += $(PG) $(CCFLAGS) $(SASR) $(DEBUG) $(MULHACK) $(FAST) \
+_ASTCFLAGS += $(PG) $(CCFLAGS) $(SASR) $(DEBUG) $(MULHACK) $(FAST) \
 	$(LTP_CUT) $(WAV49) $(K6OPT) $(CCINC) -I$(INC)
 ######### It's $(CC) $(CFLAGS)
 
@@ -477,7 +477,7 @@ clean:	semi-clean
 			$(TOAST) $(TCAT) $(UNTOAST)	\
 			$(ROOT)/gsm-1.0.tar.Z
 		rm -rf lib
-		rm -f .*.d
+		rm -f .*.d *.i */*.i
 
 # Two tools that helped me generate gsm_encode.c and gsm_decode.c,
 # but aren't generally needed to port this.

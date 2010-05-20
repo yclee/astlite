@@ -26,7 +26,7 @@
  *
  * %x describes the contexts we have: paren, semic and argg, plus INITIAL
  */
-%x paren semic argg  comment
+%x paren semic argg  comment curlystate wordstate brackstate
 
 /* prefix used for various globally-visible functions and variables.
  * This renames also yywrap, but since we do not use it, we just
@@ -34,6 +34,14 @@
  */
 %option prefix="ael_yy"
 %option noyywrap
+
+/* I specify this option to suppress flex generating code with ECHO
+  in it. This generates compiler warnings in some systems; We've
+  seen the fwrite generate Unused variable warnings with 4.1.2 gcc.
+  Some systems have tweaked flex ECHO macro to keep the compiler
+  happy.  To keep the warning message from getting output, I added
+  a default rule at the end of the patterns section */
+%option nodefault
 
 /* yyfree normally just frees its arg. It can be null sometimes,
    which some systems will complain about, so, we'll define our own version */
@@ -60,7 +68,9 @@
 %option bison-locations
 
 %{
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109309 $")
+#if !defined(STANDALONE_AEL)
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 162671 $")
+#endif
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -83,8 +93,26 @@ static char pbcstack[400];	/* XXX missing size checks */
 static int pbcpos = 0;
 static void pbcpush(char x);
 static int pbcpop(char x);
-
 static int parencount = 0;
+
+/*
+ * A similar stack to keep track of matching brackets ( [ { } ] ) in word tokens surrounded by ${ ... }
+ */
+static char pbcstack2[400];	/* XXX missing size checks */
+static int pbcpos2 = 0;
+static void pbcpush2(char x);
+static int pbcpop2(char x);
+static int parencount2 = 0;
+
+/*
+ * A similar stack to keep track of matching brackets ( [ { } ] ) in word tokens surrounded by $[ ... ]
+ */
+static char pbcstack3[400];	/* XXX missing size checks */
+static int pbcpos3 = 0;
+static void pbcpush3(char x);
+static int pbcpop3(char x);
+static int parencount3 = 0;
+
 
 /*
  * current line, column and filename, updated as we read the input.
@@ -175,12 +203,15 @@ static void pbcwhere(const char *text, int *line, int *col )
 #endif
 %}
 
+KEYWORD     (context|abstract|extend|macro|globals|local|ignorepat|switch|if|ifTime|random|regexten|hint|else|goto|jump|return|break|continue|for|while|case|default|pattern|catch|switches|eswitches|includes)
 
 NOPARENS	([^()\[\]\{\}]|\\[()\[\]\{\}])*
 
 NOARGG		([^(),\{\}\[\]]|\\[,()\[\]\{\}])*
 
 NOSEMIC		([^;()\{\}\[\]]|\\[;()\[\]\{\}])*
+
+HIBIT		[\x80-\xff]
 
 %%
 
@@ -230,19 +261,151 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 <comment>[^*\n]*\n	{ ++my_lineno; my_col=1;}
 <comment>"*"+[^*/\n]*	{ my_col += yyleng; }
 <comment>"*"+[^*/\n]*\n 	{ ++my_lineno; my_col=1;}
-<comment>"*/"		{ my_col += 2; BEGIN(INITIAL); }
+<comment>"*/"		{ my_col += 2; BEGIN(INITIAL); } /* the nice thing about comments is that you know exactly what ends them */
 
 \n		{ my_lineno++; my_col = 1; }
 [ ]+		{ my_col += yyleng; }
 [\t]+		{ my_col += (yyleng*8)-(my_col%8); }
 
-[-a-zA-Z0-9'"_/.\<\>\*\+!$#\[\]][-a-zA-Z0-9'"_/.!\*\+\<\>\{\}$#\[\]]*	{
+({KEYWORD}?[-a-zA-Z0-9'"_/.\<\>\*\+!$#\[\]]|{HIBIT}|(\\.)|(\$\{)|(\$\[)) {
+		/* boy did I open a can of worms when I changed the lexical token "word".
+		all the above keywords can be used as a beginning to a "word".-
+		before, a "word" would match a longer sequence than the above
+		keywords, and all would be well. But now "word" is a single char
+		and feeds into a statemachine sort of sequence from there on. So...
+		I added the {KEYWORD}? to the beginning of the word match sequence */
+
+		if (!strcmp(yytext,"${")) {
+			parencount2 = 0;
+			pbcpos2 = 0;
+			pbcpush2('{');  /* push '{' so the last pcbpop (parencount2 = -1) will succeed */
+			BEGIN(curlystate);
+			yymore();
+		} else if (!strcmp(yytext,"$[")) { 
+			parencount3 = 0; 
+			pbcpos3 = 0; 
+			pbcpush3('[');  /* push '[' so the last pcbpop (parencount3 = -1) will succeed */ 
+			BEGIN(brackstate); 
+			yymore(); 
+		} else { 
+			BEGIN(wordstate); 
+			yymore(); 
+		} 
+	} 
+
+<wordstate>[-a-zA-Z0-9'"_/.\<\>\*\+!$#\[\]] { yymore(); /* Keep going */ }
+<wordstate>{HIBIT} { yymore(); /* Keep going */ }
+<wordstate>(\\.)  { yymore(); /* Keep Going */ }
+<wordstate>(\$\{)  { /* the beginning of a ${} construct. prepare and pop into curlystate */
+		parencount2 = 0;
+		pbcpos2 = 0;
+		pbcpush2('{');  /* push '{' so the last pcbpop (parencount2 = -1) will succeed */
+		BEGIN(curlystate);
+		yymore();
+      }
+<wordstate>(\$\[)  { /* the beginning of a $[] construct. prepare and pop into brackstate */
+		parencount3 = 0;
+		pbcpos3 = 0;
+		pbcpush3('[');  /* push '[' so the last pcbpop (parencount3 = -1) will succeed */
+		BEGIN(brackstate);
+		yymore();
+	}
+<wordstate>([^a-zA-Z0-9\x80-\xff\x2d'"_/.\<\>\*\+!$#\[\]]) {
+		/* a non-word constituent char, like a space, tab, curly, paren, etc */
+		char c = yytext[yyleng-1];
 		STORE_POS;
-		yylval->str = strdup(yytext);
+		yylval->str = malloc(yyleng);
+		strncpy(yylval->str, yytext, yyleng);
+		yylval->str[yyleng-1] = 0;
+		unput(c);  /* put this ending char back in the stream */
+		BEGIN(0);
 		prev_word = yylval->str;
 		return word;
 	}
+<curlystate>{NOPARENS}\}	{
+		if ( pbcpop2('}') ) {	/* error */
+			STORE_LOC;
+			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched ')' in expression: %s !\n", my_file, my_lineno, my_col, yytext);
+			BEGIN(0);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
+			return word;
+		}
+		parencount2--;
+		if ( parencount2 >= 0) {
+			yymore();
+		} else {
+			BEGIN(wordstate); /* Finished with the current ${} construct. Return to word gathering state */
+			yymore();
+		}
+	}
 
+<curlystate>{NOPARENS}[\(\[\{]	{ 
+		char c = yytext[yyleng-1];
+		if (c == '{')
+			parencount2++;
+		pbcpush2(c);
+		yymore();
+	}
+
+<curlystate>{NOPARENS}[\]\)]	{ 
+		char c = yytext[yyleng-1];
+		if ( pbcpop2(c))  { /* error */
+			STORE_LOC;
+			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched '%c' in expression!\n",
+				my_file, my_lineno, my_col, c);
+			BEGIN(0);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
+			return word;
+		}
+		yymore();
+	}
+
+
+<brackstate>{NOPARENS}\]	{
+		if ( pbcpop3(']') ) {	/* error */
+			STORE_LOC;
+			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched ')' in expression: %s !\n", my_file, my_lineno, my_col, yytext);
+			BEGIN(0);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
+			return word;
+		}
+		parencount3--;
+		if ( parencount3 >= 0) {
+			yymore();
+		} else {
+			BEGIN(wordstate); /* Finished with the current ${} construct. Return to word gathering state */
+			yymore();
+		}
+	}
+
+<brackstate>{NOPARENS}[\(\[\{]	{ 
+		char c = yytext[yyleng-1];
+		if (c == '[')
+			parencount3++;
+		pbcpush3(c);
+		yymore();
+	}
+
+<brackstate>{NOPARENS}[\}\)]	{ 
+		char c = yytext[yyleng-1];
+		if ( pbcpop3(c))  { /* error */
+			STORE_LOC;
+			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched '%c' in expression!\n",
+				my_file, my_lineno, my_col, c);
+			BEGIN(0);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
+			return word;
+		}
+		yymore();
+	}
 
 
 	/*
@@ -257,7 +420,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			STORE_LOC;
 			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched ')' in expression: %s !\n", my_file, my_lineno, my_col, yytext);
 			BEGIN(0);
-			yylval->str = strdup(yytext);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
 			prev_word = 0;
 			return word;
 		}
@@ -266,8 +431,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			yymore();
 		} else {
 			STORE_LOC;
-			yylval->str = strdup(yytext);
-			yylval->str[yyleng-1] = '\0'; /* trim trailing ')' */
+			yylval->str = malloc(yyleng);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng-1] = 0;
 			unput(')');
 			BEGIN(0);
 			return word;
@@ -289,8 +455,10 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched '%c' in expression!\n",
 				my_file, my_lineno, my_col, c);
 			BEGIN(0);
-			yylval->str = strdup(yytext);
-			return word;
+				yylval->str = malloc(yyleng+1);
+				strncpy(yylval->str, yytext, yyleng);
+				yylval->str[yyleng] = 0;
+				return word;
 		}
 		yymore();
 	}
@@ -317,7 +485,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			STORE_LOC;
 			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched ')' in expression!\n", my_file, my_lineno, my_col);
 			BEGIN(0);
-			yylval->str = strdup(yytext);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = 0;
 			return word;
 		}
 
@@ -329,7 +499,8 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			BEGIN(0);
 			if ( !strcmp(yytext, ")") )
 				return RP;
-			yylval->str = strdup(yytext);
+			yylval->str = malloc(yyleng);
+			strncpy(yylval->str, yytext, yyleng);
 			yylval->str[yyleng-1] = '\0'; /* trim trailing ')' */
 			unput(')');
 			return word;
@@ -337,14 +508,15 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 	}
 
 <argg>{NOARGG}\,	{
-		if( parencount != 0) { /* printf("Folding in a comma!\n"); */
+		if( parencount != 0) { /* ast_log(LOG_NOTICE,"Folding in a comma!\n"); */
 			yymore();
 		} else  {
 			STORE_LOC;
 			if( !strcmp(yytext,"," ) )
 				return COMMA;
-			yylval->str = strdup(yytext);
-			yylval->str[yyleng-1] = '\0';
+			yylval->str = malloc(yyleng);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng-1] = '\0'; /* trim trailing ',' */
 			unput(',');
 			return word;
 		}
@@ -356,7 +528,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			STORE_LOC;
 			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched '%c' in expression!\n", my_file, my_lineno, my_col, c);
 			BEGIN(0);
-			yylval->str = strdup(yytext);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = '\0';
 			return word;
 		}
 		yymore();
@@ -379,7 +553,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 			STORE_LOC;
 			ast_log(LOG_ERROR,"File=%s, line=%d, column=%d: Mismatched '%c' in expression!\n", my_file, my_lineno, my_col, c);
 			BEGIN(0);
-			yylval->str = strdup(yytext);
+			yylval->str = malloc(yyleng+1);
+			strncpy(yylval->str, yytext, yyleng);
+			yylval->str[yyleng] = '\0';
 			return word;
 		}
 		yymore();
@@ -387,8 +563,9 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 
 <semic>{NOSEMIC};	{
 		STORE_LOC;
-		yylval->str = strdup(yytext);
-		yylval->str[yyleng-1] = '\0';
+		yylval->str = malloc(yyleng);
+		strncpy(yylval->str, yytext, yyleng);
+		yylval->str[yyleng-1] = '\0'; /* trim trailing ';' */
 		unput(';');
 		BEGIN(0);
 		return word;
@@ -467,6 +644,8 @@ includes	{ STORE_POS; return KW_INCLUDES;}
 		}
 	}
 
+<*>.|\n		{ /* default rule */ ast_log(LOG_ERROR,"Unhandled char(s): %s\n", yytext); }
+
 %%
 
 static void pbcpush(char x)
@@ -486,6 +665,38 @@ static int pbcpop(char x)
 		|| ( x == ']' && pbcstack[pbcpos-1] == '[' )
 		|| ( x == '}' && pbcstack[pbcpos-1] == '{' )) {
 		pbcpos--;
+		return 0;
+	}
+	return 1; /* error */
+}
+
+static void pbcpush2(char x)
+{
+	pbcstack2[pbcpos2++] = x;
+}
+
+static int pbcpop2(char x)
+{
+	if (   ( x == ')' && pbcstack2[pbcpos2-1] == '(' )
+		|| ( x == ']' && pbcstack2[pbcpos2-1] == '[' )
+		|| ( x == '}' && pbcstack2[pbcpos2-1] == '{' )) {
+		pbcpos2--;
+		return 0;
+	}
+	return 1; /* error */
+}
+
+static void pbcpush3(char x)
+{
+	pbcstack3[pbcpos3++] = x;
+}
+
+static int pbcpop3(char x)
+{
+	if (   ( x == ')' && pbcstack3[pbcpos3-1] == '(' )
+		|| ( x == ']' && pbcstack3[pbcpos3-1] == '[' )
+		|| ( x == '}' && pbcstack3[pbcpos3-1] == '{' )) {
+		pbcpos3--;
 		return 0;
 	}
 	return 1; /* error */
@@ -589,7 +800,9 @@ struct pval *ael2_parse(char *filename, int *errors)
 	my_file = strdup(filename);
 	stat(filename, &stats);
 	buffer = (char*)malloc(stats.st_size+2);
-	fread(buffer, 1, stats.st_size, fin);
+	if (fread(buffer, 1, stats.st_size, fin) != stats.st_size) {
+		ast_log(LOG_ERROR, "fread() failed: %s\n", strerror(errno));
+	}			
 	buffer[stats.st_size]=0;
 	fclose(fin);
 
@@ -657,7 +870,9 @@ static void setup_filestack(char *fnamebuf2, int fnamebuf_siz, glob_t *globbuf, 
 			struct stat stats;
 			stat(fnamebuf2, &stats);
 			buffer = (char*)malloc(stats.st_size+1);
-			fread(buffer, 1, stats.st_size, in1);
+			if (fread(buffer, 1, stats.st_size, in1) != stats.st_size) {
+				ast_log(LOG_ERROR, "fread() failed: %s\n", strerror(errno));
+			}			
 			buffer[stats.st_size] = 0;
 			ast_log(LOG_NOTICE,"  --Read in included file %s, %d chars\n",fnamebuf2, (int)stats.st_size);
 			fclose(in1);

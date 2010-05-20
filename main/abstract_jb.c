@@ -29,7 +29,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98943 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 228409 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,7 +70,8 @@ typedef long (*jb_next_impl)(void *jb);
 typedef int (*jb_remove_impl)(void *jb, struct ast_frame **fout);
 /*! \brief Force resynch */
 typedef void (*jb_force_resynch_impl)(void *jb);
-
+/*! \brief Empty and reset jb */
+typedef void (*jb_empty_and_reset_impl)(void *jb);
 
 /*!
  * \brief Jitterbuffer implementation private struct.
@@ -86,6 +87,7 @@ struct ast_jb_impl
 	jb_next_impl next;
 	jb_remove_impl remove;
 	jb_force_resynch_impl force_resync;
+	jb_empty_and_reset_impl empty_and_reset;
 };
 
 /* Implementation functions */
@@ -98,6 +100,7 @@ static int jb_get_fixed(void *jb, struct ast_frame **fout, long now, long interp
 static long jb_next_fixed(void *jb);
 static int jb_remove_fixed(void *jb, struct ast_frame **fout);
 static void jb_force_resynch_fixed(void *jb);
+static void jb_empty_and_reset_fixed(void *jb);
 /* adaptive */
 static void * jb_create_adaptive(struct ast_jb_conf *general_config, long resynch_threshold);
 static void jb_destroy_adaptive(void *jb);
@@ -107,6 +110,7 @@ static int jb_get_adaptive(void *jb, struct ast_frame **fout, long now, long int
 static long jb_next_adaptive(void *jb);
 static int jb_remove_adaptive(void *jb, struct ast_frame **fout);
 static void jb_force_resynch_adaptive(void *jb);
+static void jb_empty_and_reset_adaptive(void *jb);
 
 /* Available jb implementations */
 static struct ast_jb_impl avail_impl[] = 
@@ -120,7 +124,8 @@ static struct ast_jb_impl avail_impl[] =
 		.get = jb_get_fixed,
 		.next = jb_next_fixed,
 		.remove = jb_remove_fixed,
-		.force_resync = jb_force_resynch_fixed
+		.force_resync = jb_force_resynch_fixed,
+		.empty_and_reset = jb_empty_and_reset_fixed,
 	},
 	{
 		.name = "adaptive",
@@ -131,7 +136,8 @@ static struct ast_jb_impl avail_impl[] =
 		.get = jb_get_adaptive,
 		.next = jb_next_adaptive,
 		.remove = jb_remove_adaptive,
-		.force_resync = jb_force_resynch_adaptive
+		.force_resync = jb_force_resynch_adaptive,
+		.empty_and_reset = jb_empty_and_reset_adaptive,
 	}
 };
 
@@ -226,7 +232,7 @@ int ast_jb_do_usecheck(struct ast_channel *c0, struct ast_channel *c1)
 			}
 			ast_set_flag(jb0, JB_TIMEBASE_INITIALIZED);
 		}
-		
+	
 		if (!c0_jb_created) {
 			jb_choose_impl(c0);
 		}
@@ -383,7 +389,7 @@ static void jb_get_and_deliver(struct ast_channel *chan)
 	struct ast_jb *jb = &chan->jb;
 	struct ast_jb_impl *jbimpl = jb->impl;
 	void *jbobj = jb->jbobj;
-	struct ast_frame *f, finterp;
+	struct ast_frame *f, finterp = { .frametype = AST_FRAME_VOICE, };
 	long now;
 	int interpolation_len, res;
 	
@@ -412,13 +418,9 @@ static void jb_get_and_deliver(struct ast_channel *chan)
 		case JB_IMPL_INTERP:
 			/* interpolate a frame */
 			f = &finterp;
-			f->frametype = AST_FRAME_VOICE;
 			f->subclass = jb->last_format;
-			f->datalen  = 0;
 			f->samples  = interpolation_len * 8;
-			f->mallocd  = 0;
 			f->src  = "JB interpolation";
-			f->data  = NULL;
 			f->delivery = ast_tvadd(jb->timebase, ast_samp2tv(jb->next, 1000));
 			f->offset = AST_FRIENDLY_OFFSET;
 			/* deliver the interpolated frame */
@@ -433,7 +435,7 @@ static void jb_get_and_deliver(struct ast_channel *chan)
 			return;
 		default:
 			ast_log(LOG_ERROR, "This should never happen!\n");
-			CRASH;
+			ast_assert("JB type unknown" == NULL);
 			break;
 		}
 		
@@ -487,10 +489,9 @@ static int create_jb(struct ast_channel *chan, struct ast_frame *frr)
 			*tmp = '#';
 		
 		bridged = ast_bridged_channel(chan);
-		if (!bridged) {
-			/* We should always have bridged chan if a jitterbuffer is in use */
-			CRASH;
-		}
+		/* We should always have bridged chan if a jitterbuffer is in use */
+		ast_assert(bridged != NULL);
+
 		snprintf(name1, sizeof(name1), "%s", bridged->name);
 		tmp = strchr(name1, '/');
 		if (tmp)
@@ -609,21 +610,36 @@ void ast_jb_get_config(const struct ast_channel *chan, struct ast_jb_conf *conf)
 	memcpy(conf, &chan->jb.conf, sizeof(*conf));
 }
 
+void ast_jb_empty_and_reset(struct ast_channel *c0, struct ast_channel *c1)
+{
+	struct ast_jb *jb0 = &c0->jb;
+	struct ast_jb *jb1 = &c1->jb;
+	int c0_use_jb = ast_test_flag(jb0, JB_USE);
+	int c0_jb_is_created = ast_test_flag(jb0, JB_CREATED);
+	int c1_use_jb = ast_test_flag(jb1, JB_USE);
+	int c1_jb_is_created = ast_test_flag(jb1, JB_CREATED);
+
+	if (c0_use_jb && c0_jb_is_created && jb0->impl->empty_and_reset) {
+		jb0->impl->empty_and_reset(jb0->jbobj);
+	}
+
+	if (c1_use_jb && c1_jb_is_created && jb1->impl->empty_and_reset) {
+		jb1->impl->empty_and_reset(jb1->jbobj);
+	}
+}
 
 /* Implementation functions */
 
 /* fixed */
-
 static void * jb_create_fixed(struct ast_jb_conf *general_config, long resynch_threshold)
 {
 	struct fixed_jb_conf conf;
-	
+
 	conf.jbsize = general_config->max_size;
 	conf.resync_threshold = resynch_threshold;
-	
+
 	return fixed_jb_new(&conf);
 }
-
 
 static void jb_destroy_fixed(void *jb)
 {
@@ -697,6 +713,15 @@ static void jb_force_resynch_fixed(void *jb)
 	fixed_jb_set_force_resynch(fixedjb);
 }
 
+static void jb_empty_and_reset_fixed(void *jb)
+{
+	struct fixed_jb *fixedjb = jb;
+	struct fixed_jb_frame f;
+
+	while (fixed_jb_remove(fixedjb, &f) == FIXED_JB_OK) {
+		ast_frfree(f.data);
+	}
+}
 
 /* adaptive */
 
@@ -778,4 +803,16 @@ static int jb_remove_adaptive(void *jb, struct ast_frame **fout)
 
 static void jb_force_resynch_adaptive(void *jb)
 {
+}
+
+static void jb_empty_and_reset_adaptive(void *jb)
+{
+	jitterbuf *adaptivejb = jb;
+	jb_frame f;
+
+	while (jb_getall(adaptivejb, &f) == JB_OK) {
+		ast_frfree(f.data);
+	}
+
+	jb_reset(adaptivejb);
 }

@@ -24,17 +24,13 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 59256 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <sys/types.h>
+#include <regex.h>
 
 #include "asterisk/module.h"
 #include "asterisk/channel.h"
 #include "asterisk/pbx.h"
-#include "asterisk/logger.h"
 #include "asterisk/utils.h"
 #include "asterisk/app.h"
 #include "asterisk/indications.h"
@@ -120,10 +116,10 @@ static int func_channel_write(struct ast_channel *chan, char *function,
 	} else if (!strcasecmp(data, "callgroup"))
 		chan->callgroup = ast_get_group(value);
 	else if (!strcasecmp(data, "txgain")) {
-		sscanf(value, "%hhd", &gainset);
+		sscanf(value, "%4hhd", &gainset);
 		ast_channel_setoption(chan, AST_OPTION_TXGAIN, &gainset, sizeof(gainset), 0);
 	} else if (!strcasecmp(data, "rxgain")) {
-		sscanf(value, "%hhd", &gainset);
+		sscanf(value, "%4hhd", &gainset);
 		ast_channel_setoption(chan, AST_OPTION_RXGAIN, &gainset, sizeof(gainset), 0);
 	} else if (!strcasecmp(data, "transfercapability")) {
 		unsigned short i;
@@ -159,6 +155,8 @@ static struct ast_custom_function channel_function = {
 		"R/W	rxgain             set rxgain level on channel drivers that support it\n"
 		"R/O	state              state for channel\n"
 		"R/W	tonezone           zone for indications played\n"
+		"R/W	transfercapability ISDN transfer capability (one of SPEECH, DIGITAL,\n"
+		"                          RESTRICTED_DIGITAL, 3K1AUDIO, DIGITAL_W_TONES, or VIDEO).\n"
 		"R/W	txgain             set txgain level on channel drivers that support it\n"
 		"R/O	videonativeformat  format used natively for video\n"
 		"\n"

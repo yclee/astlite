@@ -44,7 +44,7 @@ extern "C" {
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 106235 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 211528 $")
 
 #ifdef __cplusplus
 }
@@ -102,6 +102,8 @@ extern "C" {
 }
 #endif
 
+#undef open
+#undef close
 #include "h323/chan_h323.h"
 
 receive_digit_cb on_receive_digit;
@@ -1149,7 +1151,7 @@ static struct oh323_pvt *find_call_locked(int call_reference, const char *token)
 	while(pvt) {
 		if (!pvt->needdestroy && ((signed int)pvt->cd.call_reference == call_reference)) {
 			/* Found the call */
-			if ((token != NULL) && (!strcmp(pvt->cd.call_token, token))) {
+			if ((token != NULL) && (pvt->cd.call_token != NULL) && (!strcmp(pvt->cd.call_token, token))) {
 				ast_mutex_lock(&pvt->lock);
 				ast_mutex_unlock(&iflock);
 				return pvt;
@@ -1256,6 +1258,8 @@ static int update_common_options(struct ast_variable *v, struct call_options *op
 
 	if (!strcasecmp(v->name, "allow")) {
 		ast_parse_allow_disallow(&options->prefs, &options->capability, v->value, 1);
+	} else if (!strcasecmp(v->name, "autoframing")) {
+		options->autoframing = ast_true(v->value);
 	} else if (!strcasecmp(v->name, "disallow")) {
 		ast_parse_allow_disallow(&options->prefs, &options->capability, v->value, 0);
 	} else if (!strcasecmp(v->name, "dtmfmode")) {
@@ -1489,6 +1493,10 @@ static struct oh323_peer *build_peer(const char *name, struct ast_variable *v, s
 			peer->ha = ast_append_ha(v->name, v->value, peer->ha);
 		} else if (!strcasecmp(v->name, "mailbox")) {
 			ast_copy_string(peer->mailbox, v->value, sizeof(peer->mailbox));
+		} else if (!strcasecmp(v->name, "hasvoicemail")) {
+			if (ast_true(v->value) && ast_strlen_zero(peer->mailbox)) {
+				ast_copy_string(peer->mailbox, name, sizeof(peer->mailbox));
+			}
 		}
 	}
 	ASTOBJ_UNMARK(peer);
@@ -2405,8 +2413,15 @@ static void set_peer_capabilities(unsigned call_reference, const char *token, in
 				ast_log(LOG_DEBUG, "prefs[%d]=%s:%d\n", i, (prefs->order[i] ? ast_getformatname(1 << (prefs->order[i]-1)) : "<none>"), prefs->framing[i]);
 			}
 		}
-		if (pvt->rtp)
-			ast_rtp_codec_setpref(pvt->rtp, &pvt->peer_prefs);
+		if (pvt->rtp) {
+			if (pvt->options.autoframing) {
+				ast_log(LOG_DEBUG, "Autoframing option set, using peer's packetization settings\n");
+				ast_rtp_codec_setpref(pvt->rtp, &pvt->peer_prefs);
+			} else {
+				ast_log(LOG_DEBUG, "Autoframing option not set, using ignoring peer's packetization settings\n");
+				ast_rtp_codec_setpref(pvt->rtp, &pvt->options.prefs);
+			}
+		}
 	}
 	ast_mutex_unlock(&pvt->lock);
 }
@@ -2430,8 +2445,15 @@ static void set_local_capabilities(unsigned call_reference, const char *token)
 	ast_mutex_unlock(&pvt->lock);
 	h323_set_capabilities(token, capability, dtmfmode, &prefs, pref_codec);
 
-	if (h323debug)
+	if (h323debug) {
+		int i;
+		for (i = 0; i < 32; i++) {
+			if (!prefs.order[i])
+				break;
+			ast_log(LOG_DEBUG, "local prefs[%d]=%s:%d\n", i, (prefs.order[i] ? ast_getformatname(1 << (prefs.order[i]-1)) : "<none>"), prefs.framing[i]);
+		}
 		ast_log(LOG_DEBUG, "Capabilities for connection %s is set\n", token);
+	}
 }
 
 static void *do_monitor(void *data)
@@ -2506,7 +2528,6 @@ restartsearch:
 
 static int restart_monitor(void)
 {
-	pthread_attr_t attr;
 	/* If we're supposed to be stopped -- stay stopped */
 	if (ast_mutex_lock(&monlock)) {
 		ast_log(LOG_WARNING, "Unable to lock monitor\n");
@@ -2525,17 +2546,13 @@ static int restart_monitor(void)
 		/* Wake up the thread */
 		pthread_kill(monitor_thread, SIGURG);
 	} else {
-		pthread_attr_init(&attr);
-		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 		/* Start a new monitor */
-		if (ast_pthread_create_background(&monitor_thread, &attr, do_monitor, NULL) < 0) {
+		if (ast_pthread_create_background(&monitor_thread, NULL, do_monitor, NULL) < 0) {
 			monitor_thread = AST_PTHREADT_NULL;
 			ast_mutex_unlock(&monlock);
 			ast_log(LOG_ERROR, "Unable to start monitor thread.\n");
-			pthread_attr_destroy(&attr);
 			return -1;
 		}
-		pthread_attr_destroy(&attr);
 	}
 	ast_mutex_unlock(&monlock);
 	return 0;
@@ -2619,6 +2636,15 @@ static int h323_tokens_show(int fd, int argc, char *argv[])
 	return RESULT_SUCCESS;
 }
 
+static int h323_version_show(int fd, int argc, char *argv[])
+{
+	if (argc != 3) {
+		return RESULT_SHOWUSAGE;
+	}
+	h323_show_version();
+	return RESULT_SUCCESS;
+}
+
 static char trace_usage[] =
 "Usage: h.323 trace <level num>\n"
 "       Enables H.323 stack tracing for debugging purposes\n";
@@ -2646,6 +2672,10 @@ static char show_hangup_usage[] =
 static char show_tokens_usage[] =
 "Usage: h.323 show tokens\n"
 "       Print out all active call tokens\n";
+
+static char show_version_usage[] =
+"Usage: h.323 show version\n"
+"		Print the version of the H.323 library in use\n";
 
 static char h323_reload_usage[] =
 "Usage: h323 reload\n"
@@ -2704,6 +2734,10 @@ static struct ast_cli_entry cli_h323[] = {
 	{ { "h323", "show", "tokens", NULL },
 	h323_tokens_show, "Show all active call tokens",
 	show_tokens_usage },
+
+	{ { "h323", "show", "version", NULL },
+	h323_version_show, "Show the version of the H.323 library in use",
+	show_version_usage },
 };
 
 static void delete_users(void)
@@ -2800,6 +2834,7 @@ static int reload_config(int is_reload)
 	global_options.dtmfmode = H323_DTMF_RFC2833;
 	global_options.capability = GLOBAL_CAPABILITY;
 	global_options.bridge = 1;		/* Do native bridging by default */
+	global_options.autoframing = 0;
 	strcpy(default_context, "default");
 	h323_signalling_port = 1720;
 	gatekeeper_disable = 1;
@@ -2855,7 +2890,7 @@ static int reload_config(int is_reload)
 				memcpy(&bindaddr.sin_addr, hp->h_addr, sizeof(bindaddr.sin_addr));
 			}
 		} else if (!strcasecmp(v->name, "tos")) {
-			if (sscanf(v->value, "%d", &format)) {
+			if (sscanf(v->value, "%30d", &format)) {
 				tos = format & 0xff;
 			} else if (!strcasecmp(v->value, "lowdelay")) {
 				tos = IPTOS_LOWDELAY;
@@ -3222,9 +3257,9 @@ static int unload_module(void)
 	}
 	if (!ast_mutex_lock(&monlock)) {
 		if ((monitor_thread != AST_PTHREADT_STOP) && (monitor_thread != AST_PTHREADT_NULL)) {
-			/* this causes a seg, anyone know why? */
-			if (monitor_thread != pthread_self())
+			if (monitor_thread != pthread_self()) {
 				pthread_cancel(monitor_thread);
+			}
 			pthread_kill(monitor_thread, SIGURG);
 			pthread_join(monitor_thread, NULL);
 		}

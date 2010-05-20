@@ -42,8 +42,8 @@ AST_CHECK_GNU_MAKE
 
 
 AC_LANG(C)
-
-AC_CHECK_FUNCS([asprintf getloadavg setenv strcasestr strndup strnlen strsep strtoq unsetenv vasprintf])
+AC_FUNC_ALLOCA
+AC_CHECK_FUNCS([asprintf getloadavg setenv strcasestr strndup strnlen strsep unsetenv vasprintf])
 
 # The frontend can use curses, ncurses or GTK2 so check for all of them
 

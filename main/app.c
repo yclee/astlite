@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 110628 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 231614 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,7 +51,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision: 110628 $")
 #include "asterisk/indications.h"
 #include "asterisk/linkedlists.h"
 
-#define MAX_OTHER_FORMATS 10
+#define AST_MAX_FORMATS 10
 
 static AST_LIST_HEAD_STATIC(groups, ast_group_info);
 
@@ -227,8 +227,12 @@ int ast_dtmf_stream(struct ast_channel *chan, struct ast_channel *peer, const ch
 		res = ast_waitfor(chan, 100);
 
 	/* ast_waitfor will return the number of remaining ms on success */
-	if (res < 0)
+	if (res < 0) {
+		if (peer) {
+			ast_autoservice_stop(peer);
+		}
 		return res;
+	}
 
 	if (ast_opt_transmit_silence) {
 		silgen = ast_channel_start_silence_generator(chan);
@@ -503,8 +507,8 @@ static int __ast_play_and_record(struct ast_channel *chan, const char *playfile,
 	char *fmts;
 	char comment[256];
 	int x, fmtcnt = 1, res = -1, outmsg = 0;
-	struct ast_filestream *others[MAX_OTHER_FORMATS];
-	char *sfmt[MAX_OTHER_FORMATS];
+	struct ast_filestream *others[AST_MAX_FORMATS];
+	char *sfmt[AST_MAX_FORMATS];
 	char *stringp = NULL;
 	time_t start, end;
 	struct ast_dsp *sildet = NULL;   /* silence detector dsp */
@@ -552,8 +556,8 @@ static int __ast_play_and_record(struct ast_channel *chan, const char *playfile,
 	sfmt[0] = ast_strdupa(fmts);
 
 	while ((fmt = strsep(&stringp, "|"))) {
-		if (fmtcnt > MAX_OTHER_FORMATS - 1) {
-			ast_log(LOG_WARNING, "Please increase MAX_OTHER_FORMATS in app.c\n");
+		if (fmtcnt > AST_MAX_FORMATS - 1) {
+			ast_log(LOG_WARNING, "Please increase AST_MAX_FORMATS in file.h\n");
 			break;
 		}
 		sfmt[fmtcnt++] = ast_strdupa(fmt);
@@ -727,15 +731,23 @@ static int __ast_play_and_record(struct ast_channel *chan, const char *playfile,
 			 * off the recording.  However, if we ended with '#', we don't want
 			 * to trim ANY part of the recording.
 			 */
-			if (res > 0 && totalsilence)
+			if (res > 0 && totalsilence) {
 				ast_stream_rewind(others[x], totalsilence - 200);
+				/* Reduce duration by a corresponding amount */
+				if (x == 0 && *duration) {
+					*duration -= (totalsilence - 200) / 1000;
+					if (*duration < 0) {
+						*duration = 0;
+					}
+				}
+			}
 			ast_truncstream(others[x]);
 			ast_closestream(others[x]);
 		}
 	}
 
 	if (prepend && outmsg) {
-		struct ast_filestream *realfiles[MAX_OTHER_FORMATS];
+		struct ast_filestream *realfiles[AST_MAX_FORMATS];
 		struct ast_frame *fr;
 
 		for (x = 0; x < fmtcnt; x++) {
@@ -911,10 +923,15 @@ int ast_app_group_update(struct ast_channel *old, struct ast_channel *new)
 	struct ast_group_info *gi = NULL;
 
 	AST_LIST_LOCK(&groups);
-	AST_LIST_TRAVERSE(&groups, gi, list) {
-		if (gi->chan == old)
+	AST_LIST_TRAVERSE_SAFE_BEGIN(&groups, gi, list) {
+		if (gi->chan == old) {
 			gi->chan = new;
+		} else if (gi->chan == new) {
+			AST_LIST_REMOVE_CURRENT(&groups, list);
+			free(gi);
+		}
 	}
+	AST_LIST_TRAVERSE_SAFE_END
 	AST_LIST_UNLOCK(&groups);
 
 	return 0;
@@ -955,7 +972,7 @@ int ast_app_group_list_unlock(void)
 unsigned int ast_app_separate_args(char *buf, char delim, char **array, int arraylen)
 {
 	int argc;
-	char *scan;
+	char *scan, *wasdelim = NULL;
 	int paren = 0, quote = 0;
 
 	if (!buf || !array || !arraylen)
@@ -982,14 +999,18 @@ unsigned int ast_app_separate_args(char *buf, char delim, char **array, int arra
 				/* Literal character, don't parse */
 				memmove(scan, scan + 1, strlen(scan));
 			} else if ((*scan == delim) && !paren && !quote) {
+				wasdelim = scan;
 				*scan++ = '\0';
 				break;
 			}
 		}
 	}
 
-	if (*scan)
+	/* If the last character in the original string was the delimiter, then
+	 * there is one additional argument. */
+	if (*scan || (scan > buf && (scan - 1) == wasdelim)) {
 		array[argc++] = scan;
+	}
 
 	return argc;
 }
@@ -1385,6 +1406,18 @@ char *ast_read_textfile(const char *filename)
 	}
 	close(fd);
 	return output;
+}
+
+void ast_app_options2str(const struct ast_app_option *options, struct ast_flags *flags, char *buf, size_t len)
+{
+	unsigned int i, found = 0;
+
+	for (i = 32; i < 128 && found < len;i++) {
+		if (ast_test_flag(flags, options[i].flag)) {
+			buf[found++] = i;
+		}
+	}
+	buf[found] = '\0';
 }
 
 int ast_app_parse_options(const struct ast_app_option *options, struct ast_flags *flags, char **args, char *optstr)

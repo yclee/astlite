@@ -38,6 +38,8 @@ persistentagents=yes
 ;
 ; Define ackcall to require an acknowledgement by '#' when
 ; an agent logs in using agentcallbacklogin.  Default is "no".
+; Can also be set to "always", which will also require AgentLogin
+; agents to acknowledge calls by pressing '#'.
 ;
 ;ackcall=no
 ;
@@ -60,7 +62,7 @@ persistentagents=yes
 ; Define the default good bye sound file for agents
 ; default to vm-goodbye
 ;
-;agentgoodbye => goodbye_file
+;goodbye => goodbye_file
 ;
 ; Define updatecdr. This is whether or not to change the source 
 ; channel in the CDR record for this call to agent/agent_id so 

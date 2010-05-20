@@ -36,7 +36,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 109575 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 241227 $")
 
 #include <stdio.h>
 #include <string.h>
@@ -193,11 +193,16 @@ struct agent_pvt {
 	char agent[AST_MAX_AGENT];     /*!< Agent ID */
 	char password[AST_MAX_AGENT];  /*!< Password for Agent login */
 	char name[AST_MAX_AGENT];
+	int inherited_devicestate;     /*!< Does the underlying channel have a devicestate to pass? */
 	ast_mutex_t app_lock;          /**< Synchronization between owning applications */
-	volatile pthread_t owning_app; /**< Owning application thread id */
+	int app_lock_flag;
+	ast_cond_t app_complete_cond;
 	volatile int app_sleep_cond;   /**< Sleep condition for the login app */
 	struct ast_channel *owner;     /**< Agent */
-	char loginchan[80];            /**< channel they logged in from */
+	/**! channel they logged in from. This may also be used to tell if an agent
+	 * is a callback agent or not. If this field is not zero-length, then this is
+	 * a callback agent */
+	char loginchan[80];
 	char logincallerid[80];        /**< Caller ID they had when they logged in */
 	struct ast_channel *chan;      /**< Channel we use */
 	AST_LIST_ENTRY(agent_pvt) list;	/**< Next Agent in the linked list. */
@@ -256,6 +261,7 @@ static struct ast_channel *agent_bridgedchannel(struct ast_channel *chan, struct
 static void set_agentbycallerid(const char *callerid, const char *agent);
 static struct ast_channel* agent_get_base_channel(struct ast_channel *chan);
 static int agent_set_base_channel(struct ast_channel *chan, struct ast_channel *base);
+static int agent_logoff(const char *agent, int soft);
 
 /*! \brief Channel interface description for PBX integration */
 static const struct ast_channel_tech agent_tech = {
@@ -281,6 +287,45 @@ static const struct ast_channel_tech agent_tech = {
 	.get_base_channel = agent_get_base_channel,
 	.set_base_channel = agent_set_base_channel,
 };
+
+static int agent_devicestate_cb(const char *dev, int state, void *data)
+{
+	int res, i;
+	struct agent_pvt *p;
+	char basename[AST_CHANNEL_NAME], *tmp;
+
+	/* Skip Agent status */
+	if (!strncasecmp(dev, "Agent/", 6)) {
+		return 0;
+	}
+
+	/* Try to be safe, but don't deadlock */
+	for (i = 0; i < 10; i++) {
+		if ((res = AST_LIST_TRYLOCK(&agents)) == 0) {
+			break;
+		}
+	}
+	if (res) {
+		return -1;
+	}
+
+	AST_LIST_TRAVERSE(&agents, p, list) {
+		ast_mutex_lock(&p->lock);
+		if (p->chan && !ast_strlen_zero(p->loginchan)) {
+			ast_copy_string(basename, p->chan->name, sizeof(basename));
+			if ((tmp = strrchr(basename, '-'))) {
+				*tmp = '\0';
+			}
+			if (strcasecmp(p->chan->name, dev) == 0 || strcasecmp(basename, dev) == 0) {
+				p->inherited_devicestate = state;
+				ast_device_state_changed("Agent/%s", p->agent);
+			}
+		}
+		ast_mutex_unlock(&p->lock);
+	}
+	AST_LIST_UNLOCK(&agents);
+	return 0;
+}
 
 /*!
  * Adds an agent to the global list of agents.
@@ -340,10 +385,12 @@ static struct agent_pvt *add_agent(char *agent, int pending)
 		ast_copy_string(p->agent, agt, sizeof(p->agent));
 		ast_mutex_init(&p->lock);
 		ast_mutex_init(&p->app_lock);
-		p->owning_app = (pthread_t) -1;
+		ast_cond_init(&p->app_complete_cond, NULL);
+		p->app_lock_flag = 0;
 		p->app_sleep_cond = 1;
 		p->group = group;
 		p->pending = pending;
+		p->inherited_devicestate = -1;
 		AST_LIST_INSERT_TAIL(&agents, p, list);
 	}
 	
@@ -387,12 +434,14 @@ static int agent_cleanup(struct agent_pvt *p)
 	chan->tech_pvt = NULL;
 	p->app_sleep_cond = 1;
 	/* Release ownership of the agent to other threads (presumably running the login app). */
-	ast_mutex_unlock(&p->app_lock);
+	p->app_lock_flag = 0;
+	ast_cond_signal(&p->app_complete_cond);
 	if (chan)
 		ast_channel_free(chan);
 	if (p->dead) {
 		ast_mutex_destroy(&p->lock);
 		ast_mutex_destroy(&p->app_lock);
+		ast_cond_destroy(&p->app_complete_cond);
 		free(p);
         }
 	return 0;
@@ -445,8 +494,12 @@ static struct ast_frame *agent_read(struct ast_channel *ast)
 	struct ast_frame *f = NULL;
 	static struct ast_frame answer_frame = { AST_FRAME_CONTROL, AST_CONTROL_ANSWER };
 	const char *status;
-	ast_mutex_lock(&p->lock); 
+	int cur_time = time(NULL);
+	ast_mutex_lock(&p->lock);
 	CHECK_FORMATS(ast, p);
+	if (!p->start) {
+		p->start = cur_time;
+	}
 	if (p->chan) {
 		ast_copy_flags(p->chan, ast, AST_FLAG_EXCEPTION);
 		p->chan->fdno = (ast->fdno == AST_AGENT_FD) ? AST_TIMING_FD : ast->fdno;
@@ -462,10 +515,17 @@ static struct ast_frame *agent_read(struct ast_channel *ast)
 			if (!ast_strlen_zero(p->loginchan)) {
 				if (p->chan)
 					ast_log(LOG_DEBUG, "Bridge on '%s' being cleared (2)\n", p->chan->name);
-
+				if (p->owner->_state != AST_STATE_UP) {
+					int howlong = cur_time - p->start;
+					if (p->autologoff && howlong >= p->autologoff) {
+						p->loginstart = 0;
+							ast_log(LOG_NOTICE, "Agent '%s' didn't answer/confirm within %d seconds (waited %d)\n", p->name, p->autologoff, howlong);
+						agent_logoff_maintenance(p, p->loginchan, (cur_time = p->loginstart), ast->uniqueid, "Autologoff");
+					}
+				}
 				status = pbx_builtin_getvar_helper(p->chan, "CHANLOCALSTATUS");
 				if (autologoffunavail && status && !strcasecmp(status, "CHANUNAVAIL")) {
-					long logintime = time(NULL) - p->loginstart;
+					long logintime = cur_time - p->loginstart;
 					p->loginstart = 0;
 					ast_log(LOG_NOTICE, "Agent read: '%s' is not available now, auto logoff\n", p->name);
 					agent_logoff_maintenance(p, p->loginchan, logintime, ast->uniqueid, "Chanunavail");
@@ -475,31 +535,63 @@ static struct ast_frame *agent_read(struct ast_channel *ast)
 					p->lastdisc = ast_tvadd(ast_tvnow(), ast_samp2tv(p->wrapuptime, 1000));
 			}
 			p->chan = NULL;
+			p->inherited_devicestate = -1;
+			ast_device_state_changed("Agent/%s", p->agent);
 			p->acknowledged = 0;
 		}
- 	} else {
- 		/* if acknowledgement is not required, and the channel is up, we may have missed
+	} else {
+		/* if acknowledgement is not required, and the channel is up, we may have missed
  		   an AST_CONTROL_ANSWER (if there was one), so mark the call acknowledged anyway */
- 		if (!p->ackcall && !p->acknowledged && p->chan && (p->chan->_state == AST_STATE_UP))
-  			p->acknowledged = 1;
- 		switch (f->frametype) {
- 		case AST_FRAME_CONTROL:
- 			if (f->subclass == AST_CONTROL_ANSWER) {
- 				if (p->ackcall) {
- 					if (option_verbose > 2)
- 						ast_verbose(VERBOSE_PREFIX_3 "%s answered, waiting for '#' to acknowledge\n", p->chan->name);
- 					/* Don't pass answer along */
- 					ast_frfree(f);
- 					f = &ast_null_frame;
- 				} else {
- 					p->acknowledged = 1;
- 					/* Use the builtin answer frame for the 
+		if (!p->ackcall && !p->acknowledged && p->chan && (p->chan->_state == AST_STATE_UP)) {
+			p->acknowledged = 1;
+		}
+		if (!p->acknowledged) {
+			int howlong = cur_time - p->start;
+			if (p->autologoff && (howlong >= p->autologoff)) {
+				ast_log(LOG_NOTICE, "Agent '%s' didn't answer/confirm within %d seconds (waited %d)\n", p->name, p->autologoff, howlong);
+				agent_logoff_maintenance(p, p->loginchan, (cur_time - p->loginstart), ast->uniqueid, "Autologoff");
+				if (p->owner || p->chan) {
+					while (p->owner && ast_channel_trylock(p->owner)) {
+						DEADLOCK_AVOIDANCE(&p->lock);
+					}
+					if (p->owner) {
+						ast_softhangup(p->owner, AST_SOFTHANGUP_EXPLICIT);
+						ast_channel_unlock(p->owner);
+					}
+
+					while (p->chan && ast_channel_trylock(p->chan)) {
+						DEADLOCK_AVOIDANCE(&p->lock);
+					}
+					if (p->chan) {
+						ast_softhangup(p->chan, AST_SOFTHANGUP_EXPLICIT);
+						ast_channel_unlock(p->chan);
+					}
+				} else {
+					long logintime;
+					logintime = time(NULL) - p->loginstart;
+					p->loginstart = 0;
+					agent_logoff_maintenance(p, p->loginchan, logintime, NULL, "CommandLogoff");
+				}
+			}
+		}
+		switch (f->frametype) {
+		case AST_FRAME_CONTROL:
+			if (f->subclass == AST_CONTROL_ANSWER) {
+				if (p->ackcall) {
+					if (option_verbose > 2)
+						ast_verbose(VERBOSE_PREFIX_3 "%s answered, waiting for '#' to acknowledge\n", p->chan->name);
+					/* Don't pass answer along */
+					ast_frfree(f);
+					f = &ast_null_frame;
+				} else {
+					p->acknowledged = 1;
+					/* Use the builtin answer frame for the 
 					   recording start check below. */
- 					ast_frfree(f);
- 					f = &answer_frame;
- 				}
- 			}
- 			break;
+					ast_frfree(f);
+					f = &answer_frame;
+				}
+			}
+			break;
 		case AST_FRAME_DTMF_BEGIN:
 			/*ignore DTMF begin's as it can cause issues with queue announce files*/
 			if((!p->acknowledged && f->subclass == '#') || (f->subclass == '*' && endcall)){
@@ -507,31 +599,31 @@ static struct ast_frame *agent_read(struct ast_channel *ast)
 				f = &ast_null_frame;
 			}
 			break;
- 		case AST_FRAME_DTMF_END:
- 			if (!p->acknowledged && (f->subclass == '#')) {
- 				if (option_verbose > 2)
- 					ast_verbose(VERBOSE_PREFIX_3 "%s acknowledged\n", p->chan->name);
- 				p->acknowledged = 1;
- 				ast_frfree(f);
- 				f = &answer_frame;
- 			} else if (f->subclass == '*' && endcall) {
- 				/* terminates call */
- 				ast_frfree(f);
- 				f = NULL;
- 			}
- 			break;
- 		case AST_FRAME_VOICE:
- 		case AST_FRAME_VIDEO:
- 			/* don't pass voice or video until the call is acknowledged */
- 			if (!p->acknowledged) {
- 				ast_frfree(f);
- 				f = &ast_null_frame;
- 			}
+		case AST_FRAME_DTMF_END:
+			if (!p->acknowledged && (f->subclass == '#')) {
+				if (option_verbose > 2)
+					ast_verbose(VERBOSE_PREFIX_3 "%s acknowledged\n", p->chan->name);
+				p->acknowledged = 1;
+				ast_frfree(f);
+				f = &answer_frame;
+			} else if (f->subclass == '*' && endcall) {
+				/* terminates call */
+				ast_frfree(f);
+				f = NULL;
+			}
+			break;
+		case AST_FRAME_VOICE:
+		case AST_FRAME_VIDEO:
+			/* don't pass voice or video until the call is acknowledged */
+			if (!p->acknowledged) {
+				ast_frfree(f);
+				f = &ast_null_frame;
+			}
 		default:
 			/* pass everything else on through */
 			break;
-  		}
-  	}
+		}
+	}
 
 	CLEANUP(ast,p);
 	if (p->chan && !p->chan->_bridge) {
@@ -613,9 +705,15 @@ static int agent_indicate(struct ast_channel *ast, int condition, const void *da
 	struct agent_pvt *p = ast->tech_pvt;
 	int res = -1;
 	ast_mutex_lock(&p->lock);
-	if (p->chan)
-		res = p->chan->tech->indicate ? p->chan->tech->indicate(p->chan, condition, data, datalen) : -1;
-	else
+	if (p->chan && !ast_check_hangup(p->chan)) {
+		while (ast_channel_trylock(p->chan)) {
+			ast_channel_unlock(ast);
+			usleep(1);
+			ast_channel_lock(ast);
+		}
+  		res = p->chan->tech->indicate ? p->chan->tech->indicate(p->chan, condition, data, datalen) : -1;
+		ast_channel_unlock(p->chan);
+	} else
 		res = 0;
 	ast_mutex_unlock(&p->lock);
 	return res;
@@ -676,7 +774,8 @@ static int agent_call(struct ast_channel *ast, char *dest, int timeout)
 		ast_mutex_unlock(&p->lock);
 		return res;
 	}
-	ast_verbose( VERBOSE_PREFIX_3 "agent_call, call to agent '%s' call on '%s'\n", p->agent, p->chan->name);
+	if (option_verbose > 2)
+		ast_verbose(VERBOSE_PREFIX_3 "agent_call, call to agent '%s' call on '%s'\n", p->agent, p->chan->name);
 	if (option_debug > 2)
 		ast_log(LOG_DEBUG, "Playing beep, lang '%s'\n", p->chan->language);
 	res = ast_streamfile(p->chan, beep, p->chan->language);
@@ -696,6 +795,8 @@ static int agent_call(struct ast_channel *ast, char *dest, int timeout)
 	} else {
 		/* Agent hung-up */
 		p->chan = NULL;
+		p->inherited_devicestate = -1;
+		ast_device_state_changed("Agent/%s", p->agent);
 	}
 
 	if (!res) {
@@ -818,6 +919,8 @@ static int agent_hangup(struct ast_channel *ast)
 				/* Recognize the hangup and pass it along immediately */
 				ast_hangup(p->chan);
 				p->chan = NULL;
+				p->inherited_devicestate = -1;
+				ast_device_state_changed("Agent/%s", p->agent);
 			}
 			ast_log(LOG_DEBUG, "Hungup, howlong is %d, autologoff is %d\n", howlong, p->autologoff);
 			if ((p->deferlogoff) || (howlong && p->autologoff && (howlong > p->autologoff))) {
@@ -866,6 +969,7 @@ static int agent_hangup(struct ast_channel *ast)
 	} else if (p->dead) {
 		ast_mutex_destroy(&p->lock);
 		ast_mutex_destroy(&p->app_lock);
+		ast_cond_destroy(&p->app_complete_cond);
 		free(p);
 	} else {
 		if (p->chan) {
@@ -876,8 +980,10 @@ static int agent_hangup(struct ast_channel *ast)
 			ast_mutex_unlock(&p->lock);
 		}
 		/* Release ownership of the agent to other threads (presumably running the login app). */
-		if (ast_strlen_zero(p->loginchan))
-			ast_mutex_unlock(&p->app_lock);
+		if (ast_strlen_zero(p->loginchan)) {
+			p->app_lock_flag = 0;
+			ast_cond_signal(&p->app_complete_cond);
+		}
 	}
 	return 0;
 }
@@ -965,6 +1071,7 @@ static struct ast_channel *agent_bridgedchannel(struct ast_channel *chan, struct
 static struct ast_channel *agent_new(struct agent_pvt *p, int state)
 {
 	struct ast_channel *tmp;
+	int alreadylocked;
 #if 0
 	if (!p->chan) {
 		ast_log(LOG_WARNING, "No channel? :(\n");
@@ -972,7 +1079,7 @@ static struct ast_channel *agent_new(struct agent_pvt *p, int state)
 	}
 #endif	
 	if (p->pending)
-		tmp = ast_channel_alloc(0, state, 0, 0, "", p->chan ? p->chan->exten:"", p->chan ? p->chan->context:"", 0, "Agent/P%s-%d", p->agent, ast_random() & 0xffff);
+		tmp = ast_channel_alloc(0, state, 0, 0, "", p->chan ? p->chan->exten:"", p->chan ? p->chan->context:"", 0, "Agent/P%s-%d", p->agent, (int) ast_random() & 0xffff);
 	else
 		tmp = ast_channel_alloc(0, state, 0, 0, "", p->chan ? p->chan->exten:"", p->chan ? p->chan->context:"", 0, "Agent/%s", p->agent);
 	if (!tmp) {
@@ -1015,11 +1122,15 @@ static struct ast_channel *agent_new(struct agent_pvt *p, int state)
 	 * implemented in the kernel for this.
 	 */
 	p->app_sleep_cond = 0;
-	if(ast_strlen_zero(p->loginchan) && ast_mutex_trylock(&p->app_lock)) {
+
+	alreadylocked = p->app_lock_flag;
+	p->app_lock_flag = 1;
+
+	if(ast_strlen_zero(p->loginchan) && alreadylocked) {
 		if (p->chan) {
 			ast_queue_frame(p->chan, &ast_null_frame);
 			ast_mutex_unlock(&p->lock);	/* For other thread to read the condition. */
-			ast_mutex_lock(&p->app_lock);
+			p->app_lock_flag = 1;
 			ast_mutex_lock(&p->lock);
 		} else {
 			ast_log(LOG_WARNING, "Agent disconnected while we were connecting the call\n");
@@ -1028,7 +1139,8 @@ static struct ast_channel *agent_new(struct agent_pvt *p, int state)
 			p->app_sleep_cond = 1;
 			ast_channel_free( tmp );
 			ast_mutex_unlock(&p->lock);	/* For other thread to read the condition. */
-			ast_mutex_unlock(&p->app_lock);
+			p->app_lock_flag = 0;
+			ast_cond_signal(&p->app_complete_cond);
 			return NULL;
 		}
 	} else if (!ast_strlen_zero(p->loginchan)) {
@@ -1046,14 +1158,6 @@ static struct ast_channel *agent_new(struct agent_pvt *p, int state)
 	} 
 	if (p->chan)
 		ast_indicate(p->chan, AST_CONTROL_UNHOLD);
-	p->owning_app = pthread_self();
-	/* After the above step, there should not be any blockers. */
-	if (p->chan) {
-		if (ast_test_flag(p->chan, AST_FLAG_BLOCKING)) {
-			ast_log( LOG_ERROR, "A blocker exists after agent channel ownership acquired\n" );
-			CRASH;
-		}
-	}
 	return tmp;
 }
 
@@ -1198,6 +1302,7 @@ static int read_agent_config(void)
 				if (!p->chan) {
 					ast_mutex_destroy(&p->lock);
 					ast_mutex_destroy(&p->app_lock);
+					ast_cond_destroy(&p->app_complete_cond);
 					free(p);
 				} else {
 					/* Cause them to hang up */
@@ -1331,15 +1436,17 @@ static int allow_multiple_login(char *chan, char *context)
 	struct agent_pvt *p;
 	char loginchan[80];
 
-	if(multiplelogin)
+	if (multiplelogin) {
 		return 1;
-	if(!chan) 
+	}
+	if (!chan) {
 		return 0;
+	}
 
 	snprintf(loginchan, sizeof(loginchan), "%s@%s", chan, S_OR(context, "default"));
 	
 	AST_LIST_TRAVERSE(&agents, p, list) {
-		if(!strcasecmp(chan, p->loginchan))
+		if(!strcasecmp(loginchan, p->loginchan))
 			return 0;
 	}
 	return -1;
@@ -1358,9 +1465,9 @@ static struct ast_channel *agent_request(const char *type, int format, void *dat
 	struct timeval tv;
 
 	s = data;
-	if ((s[0] == '@') && (sscanf(s + 1, "%d", &groupoff) == 1)) {
+	if ((s[0] == '@') && (sscanf(s + 1, "%30d", &groupoff) == 1)) {
 		groupmatch = (1 << groupoff);
-	} else if ((s[0] == ':') && (sscanf(s + 1, "%d", &groupoff) == 1)) {
+	} else if ((s[0] == ':') && (sscanf(s + 1, "%30d", &groupoff) == 1)) {
 		groupmatch = (1 << groupoff);
 		waitforagent = 1;
 	} else 
@@ -1500,7 +1607,7 @@ static int action_agents(struct mansession *s, const struct message *m)
 			loginChan = ast_strdupa(p->chan->name);
 			if (p->owner && p->owner->_bridge) {
 				if (ast_bridged_channel(p->owner)) {
-					talkingtoChan = ast_strdupa(ast_bridged_channel(p->owner)->cid.cid_num);
+					talkingtoChan = ast_strdupa(S_OR(ast_bridged_channel(p->owner)->cid.cid_num, ""));
 				} else {
 					talkingtoChan = "n/a";
 				}
@@ -1567,9 +1674,10 @@ static void agent_logoff_maintenance(struct agent_pvt *p, char *loginchan, long 
 	set_agentbycallerid(p->logincallerid, NULL);
 	p->loginchan[0] ='\0';
 	p->logincallerid[0] = '\0';
+	p->inherited_devicestate = -1;
 	ast_device_state_changed("Agent/%s", p->agent);
 	if (persistent_agents)
-		dump_agents();	
+		dump_agents();
 
 }
 
@@ -1588,9 +1696,7 @@ static int agent_logoff(const char *agent, int soft)
 					ast_mutex_lock(&p->lock);
 
 					while (p->owner && ast_channel_trylock(p->owner)) {
-						ast_mutex_unlock(&p->lock);
-						usleep(1);
-						ast_mutex_lock(&p->lock);
+						DEADLOCK_AVOIDANCE(&p->lock);
 					}
 					if (p->owner) {
 						ast_softhangup(p->owner, AST_SOFTHANGUP_EXPLICIT);
@@ -1598,9 +1704,7 @@ static int agent_logoff(const char *agent, int soft)
 					}
 
 					while (p->chan && ast_channel_trylock(p->chan)) {
-						ast_mutex_unlock(&p->lock);
-						usleep(1);
-						ast_mutex_lock(&p->lock);
+						DEADLOCK_AVOIDANCE(&p->lock);
 					}
 					if (p->chan) {
 						ast_softhangup(p->chan, AST_SOFTHANGUP_EXPLICIT);
@@ -1896,6 +2000,7 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 
 	ast_copy_string(agent_goodbye, agentgoodbye, sizeof(agent_goodbye));
 
+	ast_channel_lock(chan);
 	/* Set Channel Specific Login Overrides */
 	if (pbx_builtin_getvar_helper(chan, "AGENTLMAXLOGINTRIES") && strlen(pbx_builtin_getvar_helper(chan, "AGENTLMAXLOGINTRIES"))) {
 		max_login_tries = atoi(pbx_builtin_getvar_helper(chan, "AGENTMAXLOGINTRIES"));
@@ -1920,6 +2025,7 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 		if (option_verbose > 2)
 			ast_verbose(VERBOSE_PREFIX_3 "Saw variable AGENTGOODBYE=%s, setting agent_goodbye to: %s on Channel '%s'.\n",tmpoptions,agent_goodbye,chan->name);
 	}
+	ast_channel_unlock(chan);
 	/* End Channel Specific Login Overrides */
 	
 	if (callbackmode && args.extension) {
@@ -1966,6 +2072,8 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 		/* Check again for accuracy */
 		AST_LIST_LOCK(&agents);
 		AST_LIST_TRAVERSE(&agents, p, list) {
+			int unlock_channel = 1;
+			ast_channel_lock(chan);
 			ast_mutex_lock(&p->lock);
 			if (!strcmp(p->agent, user) &&
 			    !strcmp(p->password, pass) && !p->pending) {
@@ -1986,6 +2094,8 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 					tmpoptions=pbx_builtin_getvar_helper(chan, "AGENTACKCALL");
 					if (option_verbose > 2)
 						ast_verbose(VERBOSE_PREFIX_3 "Saw variable AGENTACKCALL=%s, setting ackcall to: %d for Agent '%s'.\n",tmpoptions,p->ackcall,p->agent);
+				} else {
+					p->ackcall = ackcall;
 				}
 				if (pbx_builtin_getvar_helper(chan, "AGENTAUTOLOGOFF") && strlen(pbx_builtin_getvar_helper(chan, "AGENTAUTOLOGOFF"))) {
 					p->autologoff = atoi(pbx_builtin_getvar_helper(chan, "AGENTAUTOLOGOFF"));
@@ -1994,6 +2104,8 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 					tmpoptions=pbx_builtin_getvar_helper(chan, "AGENTAUTOLOGOFF");
 					if (option_verbose > 2)
 						ast_verbose(VERBOSE_PREFIX_3 "Saw variable AGENTAUTOLOGOFF=%s, setting autologff to: %d for Agent '%s'.\n",tmpoptions,p->autologoff,p->agent);
+				} else {
+					p->autologoff = autologoff;
 				}
 				if (pbx_builtin_getvar_helper(chan, "AGENTWRAPUPTIME") && strlen(pbx_builtin_getvar_helper(chan, "AGENTWRAPUPTIME"))) {
 					p->wrapuptime = atoi(pbx_builtin_getvar_helper(chan, "AGENTWRAPUPTIME"));
@@ -2002,7 +2114,11 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 					tmpoptions=pbx_builtin_getvar_helper(chan, "AGENTWRAPUPTIME");
 					if (option_verbose > 2)
 						ast_verbose(VERBOSE_PREFIX_3 "Saw variable AGENTWRAPUPTIME=%s, setting wrapuptime to: %d for Agent '%s'.\n",tmpoptions,p->wrapuptime,p->agent);
+				} else {
+					p->wrapuptime = wrapuptime;
 				}
+				ast_channel_unlock(chan);
+				unlock_channel = 0;
 				/* End Channel Specific Agent Overrides */
 				if (!p->chan) {
 					char last_loginchan[80] = "";
@@ -2182,15 +2298,17 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 							ast_mutex_unlock(&p->lock);
 							AST_LIST_UNLOCK(&agents);
 							/*	Synchronize channel ownership between call to agent and itself. */
-							ast_mutex_lock( &p->app_lock );
+							ast_mutex_lock(&p->app_lock);
+							if (p->app_lock_flag == 1) {
+								ast_cond_wait(&p->app_complete_cond, &p->app_lock);
+							}
+							ast_mutex_unlock(&p->app_lock);
 							ast_mutex_lock(&p->lock);
-							p->owning_app = pthread_self();
 							ast_mutex_unlock(&p->lock);
 							if (p->ackcall > 1) 
 								res = agent_ack_sleep(p);
 							else
 								res = ast_safe_sleep_conditional( chan, 1000, agent_cont_sleep, p );
-							ast_mutex_unlock( &p->app_lock );
 							if ((p->ackcall > 1)  && (res == 1)) {
 								AST_LIST_LOCK(&agents);
 								ast_mutex_lock(&p->lock);
@@ -2205,8 +2323,10 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 						if (res && p->owner) 
 							ast_log(LOG_WARNING, "Huh?  We broke out when there was still an owner?\n");
 						/* Log us off if appropriate */
-						if (p->chan == chan)
+						if (p->chan == chan) {
 							p->chan = NULL;
+							p->inherited_devicestate = -1;
+						}
 						p->acknowledged = 0;
 						logintime = time(NULL) - p->loginstart;
 						p->loginstart = 0;
@@ -2224,6 +2344,7 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 						if (p->dead && !p->owner) {
 							ast_mutex_destroy(&p->lock);
 							ast_mutex_destroy(&p->app_lock);
+							ast_cond_destroy(&p->app_complete_cond);
 							free(p);
 						}
 					}
@@ -2240,6 +2361,9 @@ static int __login_exec(struct ast_channel *chan, void *data, int callbackmode)
 				break;
 			}
 			ast_mutex_unlock(&p->lock);
+			if (unlock_channel) {
+				ast_channel_unlock(chan);
+			}
 		}
 		if (!p)
 			AST_LIST_UNLOCK(&agents);
@@ -2382,7 +2506,9 @@ static int action_agent_callback_login(struct mansession *s, const struct messag
 				p->wrapuptime = 0;
 		}
 
-		if (ast_true(ackcall_s))
+		if (!strcasecmp(ackcall_s, "always"))
+			p->ackcall = 2;
+		else if (ast_true(ackcall_s))
 			p->ackcall = 1;
 		else
 			p->ackcall = 0;
@@ -2567,9 +2693,9 @@ static int agent_devicestate(void *data)
 	int res = AST_DEVICE_INVALID;
 	
 	s = data;
-	if ((s[0] == '@') && (sscanf(s + 1, "%d", &groupoff) == 1))
+	if ((s[0] == '@') && (sscanf(s + 1, "%30d", &groupoff) == 1))
 		groupmatch = (1 << groupoff);
-	else if ((s[0] == ':') && (sscanf(s + 1, "%d", &groupoff) == 1)) {
+	else if ((s[0] == ':') && (sscanf(s + 1, "%30d", &groupoff) == 1)) {
 		groupmatch = (1 << groupoff);
 		waitforagent = 1;
 	} else 
@@ -2583,6 +2709,8 @@ static int agent_devicestate(void *data)
 			if (p->owner) {
 				if (res != AST_DEVICE_INUSE)
 					res = AST_DEVICE_BUSY;
+			} else if (p->inherited_devicestate > -1) {
+				res = p->inherited_devicestate;
 			} else {
 				if (res == AST_DEVICE_BUSY)
 					res = AST_DEVICE_INUSE;
@@ -2726,6 +2854,8 @@ static int load_module(void)
 	/* Dialplan Functions */
 	ast_custom_function_register(&agent_function);
 
+	ast_devstate_add(agent_devicestate_cb, NULL);
+
 	return 0;
 }
 
@@ -2742,6 +2872,8 @@ static int unload_module(void)
 	struct agent_pvt *p;
 	/* First, take us out of the channel loop */
 	ast_channel_unregister(&agent_tech);
+	/* Delete devicestate subscription */
+	ast_devstate_del(agent_devicestate_cb, NULL);
 	/* Unregister dialplan functions */
 	ast_custom_function_unregister(&agent_function);	
 	/* Unregister CLI commands */
@@ -2763,7 +2895,6 @@ static int unload_module(void)
 		free(p);
 	}
 	AST_LIST_UNLOCK(&agents);
-	AST_LIST_HEAD_DESTROY(&agents);
 	return 0;
 }
 

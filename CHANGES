@@ -120,6 +120,7 @@ Changes since Asterisk 1.2:
         19. SQL_ESC()
         20. STAT()
         21. STRPTIME()
+		22. AUDIOHOOK_INHERIT()
     * Apps that have changes to their interface:
          1. Authenticate() -- optional maxdigits argument added.
          2. ChanSpy() -- new options:
@@ -131,12 +132,22 @@ Changes since Asterisk 1.2:
                 o New Option: K/k parking via dtmf tones
          5. Dictate() -- optional filename argument added.
          6. Directory() -- new option: e - In addition to the name, also read the extension number...
-         7. Meetme() -- new options:
+         7. ForkCDR() -- new options: 
+                o 'a' -- update answer time on new cdr
+                o 'A' -- Lock the orig CDR answer time against changes.
+                o 'D' -- Copy the disposition from the orig to the new CDR.
+                o 'd' -- clear the dstcannel field in the new CDR.
+                o 'e' -- set the end time of the original CDR.
+                o 'R' -- do NOT reset the new CDR.
+                o 's' -- Add/change var in orig CDR.
+                o 'T' -- Force ast_cdr_end, answer to obey LOCKED flag for the orig. CDR.
+                      -- ast_cdr_setvar will be forced also (used by the CDR() func in write mode)
+         8. Meetme() -- new options:
                 o 'I' -- announce user join/leave without review
                 o 'l' -- set listen only mode (Listen only, no talking)
                 o 'o' -- set talker optimization - treats talkers who aren't speaking as...
                 o '1' -- do not play message when first person enters
-         8. MeetmeAdmin() -- new options:
+         9. MeetmeAdmin() -- new options:
                 o 'r' -- Reset one user's volume settings
                 o 'R' -- Reset all users volume settings
                 o 's' -- Lower entire conference speaking volume
@@ -147,21 +158,21 @@ Changes since Asterisk 1.2:
                 o 'U' -- Lower all users listen volume
                 o 'v' -- Lower entire conference listening volume
                 o 'V' -- Raise entire conference listening volume
-         9. OSPFinish() : now also can return ERROR result.
-        10. OSPLookup() : Sets more variables, also now returns ERROR result.
-        11. Page() -- New option: r - record the page into a file (see 'r' for app_meetme)
-        12. Pickup() -- multiple extensions, PICKUPMARK; read the description!
-        13. Queue()
+        10. OSPFinish() : now also can return ERROR result.
+        11. OSPLookup() : Sets more variables, also now returns ERROR result.
+        12. Page() -- New option: r - record the page into a file (see 'r' for app_meetme)
+        13. Pickup() -- multiple extensions, PICKUPMARK; read the description!
+        14. Queue()
                 o New Argument: AGI
                 o New option: i
-        14. Random() -- is now deprecated in 1.4
-        15. Read() -- replace 'skip' and 'noanswer' options with 's', 'n', add 'i' option.
-        16. Record() -- New option: 'x' : ignore all terminator keys (DTMF) and keep recording until hangup
-        17. UserEvent() -- slight change in behavior. Read the description.
-        18. VoiceMailMain() -- new a(#) option, goes to folder # directly.
-        19. WaitForSilence() -- new optional 3rd arg, time delay before returning.
+        15. Random() -- is now deprecated in 1.4
+        16. Read() -- replace 'skip' and 'noanswer' options with 's', 'n', add 'i' option.
+        17. Record() -- New option: 'x' : ignore all terminator keys (DTMF) and keep recording until hangup
+        18. UserEvent() -- slight change in behavior. Read the description.
+        19. VoiceMailMain() -- new a(#) option, goes to folder # directly.
+        20. WaitForSilence() -- new optional 3rd arg, time delay before returning.
     * Functions that have changes to their interfaces:
-         1. CDR -- new option: u
+         1. CDR -- new options: u and s
          2. LANGUAGE -- Deprecated. Use CHANNEL(language) instead.
          3. MUSICCLASS -- Deprecated. Use CHANNEL(musicclass) instead.
     * Configuration File Changes:
@@ -193,10 +204,11 @@ Changes since Asterisk 1.2:
                            1. mohinterpret
                            2. mohsuggest
                2. agents.conf
+                      o multiplelogin variable added
                       o maxlogintries variable added
                       o autologoffunavail variable added
                       o endcall variable added
-                      o agentgoodbye variable added
+                      o goodbye variable added
                       o createlink variable REMOVED
                3. alsa.conf
                       o mohinterpret variable added
@@ -219,6 +231,11 @@ Changes since Asterisk 1.2:
                       o atxfernoanswertimeout variable added
                       o parkcall variable added (one step parking)
                       o improved documentation for dynamic feature declarations!
+                      o added parkedcallltransfers option to control builtin transfers with parking
+                      o added parkedcallparking option to control one touch parking w/ parking pickup
+                      o added parkedcallhangup option to control disconnect feature w/ parking pickup
+                      o added parkedcallrecording option to control one-touch record w/ parking pickup
+                      o added BRIDGE_FEATURES variable to set available features for a channel
                9. iax.conf
                       o adsi variable added
                       o mohinterpret variable added
@@ -285,8 +302,15 @@ Changes since Asterisk 1.2:
               21. rtp.conf
                       o rtcpinterval varaible added
               22. sip.conf
+                      o allowguest variable can't be set to 'osp'
                       o allowoverlap variable added
                       o allowtransfer variable added
+                      o limitonpeer variable added
+                      o directrtpsetup variable added
+                      o buggymwi variable added
+                      o ospauth variable REMOVED
+                      o notifyhold variable added
+                      o autoframing variable added
                       o tos variable REMOVED
                       o tos_sip variable added
                       o tos_audio variable added
@@ -295,17 +319,22 @@ Changes since Asterisk 1.2:
                       o t1min variable added
                       o musicclass variable REMOVED
                       o mohinterpret variable added
-                      o maxcallbitratesuggest variable added
+                      o mohsuggest variable added
                       o allowsubscribe variable added
                       o videosupport variable added
                       o maxcallbitrate variable added
                       o g726nonstandard variable added
                       o dumphistory variable added
-                      o allowsubscribe variable added
                       o t38pt_udptl variable added
+                      o t38pt_rtp variable added
+                      o t38pt_tcp variable added
+                      o rfc2833compensate variable added
+                      o matchexterniplocally variable added
                       o canreinvite variable can also now be set to 'nonat'
                       o rtsavesysname variable added
                       o JitterBuffer support added
+                      o t38pt_usertpsource variable added
+                      o regcontext variable can contains multiple contexts separated by an '&'
               23. skinny.conf
                       o port variable renamed to bindport
                       o JitterBuffer support added
@@ -340,3 +369,6 @@ Changes since Asterisk 1.2:
     * New manager events:
          1. OriginateResponse event comes to replace OriginateSuccess and OriginateFailure
     * iLBC source code no longer included (see UPGRADE.txt for details)
+	* New CLI command "pri show version" that shows the current version of libpri
+	  that the library was built against (requires a version of libpri since this API
+	  feature was added).

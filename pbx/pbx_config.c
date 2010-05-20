@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 96024 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 233091 $")
 
 #include <sys/types.h>
 #include <stdlib.h>
@@ -69,7 +69,7 @@ static char context_add_extension_help[] =
 "         Now, you can dial 6123 and talk to Markster :)\n";
 
 static char context_remove_extension_help[] =
-"Usage: dialplan remove extension exten@context [priority]\n"
+"Usage: dialplan remove extension exten[/cid]@context [priority]\n"
 "       Remove an extension from a given context. If a priority\n"
 "       is given, only that specific priority from the given extension\n"
 "       will be removed.\n";
@@ -135,20 +135,23 @@ static int handle_context_dont_include_deprecated(int fd, int argc, char *argv[]
 
 static int handle_context_remove_include(int fd, int argc, char *argv[])
 {
-	if (argc != 6)
+	if (argc != 6) {
 		return RESULT_SHOWUSAGE;
+	}
 
-	if (strcmp(argv[4], "into"))
+	if (strcmp(argv[4], "from")) {
 		return RESULT_SHOWUSAGE;
+	}
 
 	if (!ast_context_remove_include(argv[5], argv[3], registrar)) {
-		ast_cli(fd, "We are not including '%s' into '%s' now\n",
+		ast_cli(fd, "The dialplan no longer includes '%s' into '%s'\n",
 			argv[3], argv[5]);
 		return RESULT_SUCCESS;
 	}
 
 	ast_cli(fd, "Failed to remove '%s' include from '%s' context\n",
 		argv[3], argv[5]);
+
 	return RESULT_FAILURE;
 }
 
@@ -204,9 +207,9 @@ static int partial_match(const char *s, const char *word, int len)
 /*! \brief split extension\@context in two parts, return -1 on error.
  * The return string is malloc'ed and pointed by *ext
  */
-static int split_ec(const char *src, char **ext, char ** const ctx)
+static int split_ec(const char *src, char **ext, char ** const ctx, char ** const cid)
 {
-	char *c, *e = ast_strdup(src); /* now src is not used anymore */
+	char *i, *c, *e = ast_strdup(src); /* now src is not used anymore */
 
 	if (e == NULL)
 		return -1;	/* malloc error */
@@ -222,7 +225,14 @@ static int split_ec(const char *src, char **ext, char ** const ctx)
 			free(e);
 			return -1;
 		}
-	} 
+	}
+	if (cid && (i = strchr(e, '/'))) {
+		*i++ = '\0';
+		*cid = i;
+	} else if (cid) {
+		/* Signal none detected */
+		*cid = NULL;
+	}
 	return 0;
 }
 
@@ -475,7 +485,7 @@ static char *complete_context_remove_include(const char *line, const char *word,
 static int handle_context_remove_extension_deprecated(int fd, int argc, char *argv[])
 {
 	int removing_priority = 0;
-	char *exten, *context;
+	char *exten, *context, *cid;
 	int ret = RESULT_FAILURE;
 
 	if (argc != 4 && argc != 3) return RESULT_SHOWUSAGE;
@@ -513,7 +523,7 @@ static int handle_context_remove_extension_deprecated(int fd, int argc, char *ar
 	/*
 	 * Format exten@context checking ...
 	 */
-	if (split_ec(argv[2], &exten, &context))
+	if (split_ec(argv[2], &exten, &context, &cid))
 		return RESULT_FAILURE; /* XXX malloc failure */
 	if ((!strlen(exten)) || (!(strlen(context)))) {
 		ast_cli(fd, "Missing extension or context name in second argument '%s'\n",
@@ -522,7 +532,9 @@ static int handle_context_remove_extension_deprecated(int fd, int argc, char *ar
 		return RESULT_FAILURE;
 	}
 
-	if (!ast_context_remove_extension(context, exten, removing_priority, registrar)) {
+	if (!ast_context_remove_extension_callerid(context, exten, removing_priority,
+			/* Do NOT substitute S_OR; it is NOT the same thing */
+			cid ? cid : (removing_priority ? "" : NULL), cid ? 1 : 0, registrar)) {
 		if (!removing_priority)
 			ast_cli(fd, "Whole extension %s@%s removed\n",
 				exten, context);
@@ -542,7 +554,7 @@ static int handle_context_remove_extension_deprecated(int fd, int argc, char *ar
 static int handle_context_remove_extension(int fd, int argc, char *argv[])
 {
 	int removing_priority = 0;
-	char *exten, *context;
+	char *exten, *context, *cid;
 	int ret = RESULT_FAILURE;
 
 	if (argc != 5 && argc != 4) return RESULT_SHOWUSAGE;
@@ -580,7 +592,7 @@ static int handle_context_remove_extension(int fd, int argc, char *argv[])
 	/*
 	 * Format exten@context checking ...
 	 */
-	if (split_ec(argv[3], &exten, &context))
+	if (split_ec(argv[3], &exten, &context, &cid))
 		return RESULT_FAILURE; /* XXX malloc failure */
 	if ((!strlen(exten)) || (!(strlen(context)))) {
 		ast_cli(fd, "Missing extension or context name in third argument '%s'\n",
@@ -589,7 +601,9 @@ static int handle_context_remove_extension(int fd, int argc, char *argv[])
 		return RESULT_FAILURE;
 	}
 
-	if (!ast_context_remove_extension(context, exten, removing_priority, registrar)) {
+	if (!ast_context_remove_extension_callerid(context, exten, removing_priority,
+			/* Do NOT substitute S_OR; it is NOT the same thing */
+			cid ? cid : (removing_priority ? "" : NULL), cid ? 1 : 0, registrar)) {
 		if (!removing_priority)
 			ast_cli(fd, "Whole extension %s@%s removed\n",
 				exten, context);
@@ -606,86 +620,25 @@ static int handle_context_remove_extension(int fd, int argc, char *argv[])
 	return ret;
 }
 
-#define BROKEN_READLINE 1
-
-#ifdef BROKEN_READLINE
-/*
- * There is one funny thing, when you have word like 300@ and you hit
- * <tab>, you arguments will like as your word is '300 ', so it '@'
- * characters acts sometimes as word delimiter and sometimes as a part
- * of word
- *
- * This fix function, allocates new word variable and store here every
- * time xxx@yyy always as one word and correct pos is set too
- *
- * It's ugly, I know, but I'm waiting for Mark suggestion if upper is
- * bug or feature ...
- */
-static int fix_complete_args(const char *line, char **word, int *pos)
-{
-	char *_line, *_strsep_line, *_previous_word = NULL, *_word = NULL;
-	int words = 0;
-
-	_line = strdup(line);
-
-	_strsep_line = _line;
-	while (_strsep_line) {
-		_previous_word = _word;
-		_word = strsep(&_strsep_line, " ");
-
-		if (_word && strlen(_word)) words++;
-	}
-
-
-	if (_word || _previous_word) {
-		if (_word) {
-			if (!strlen(_word)) words++;
-			*word = strdup(_word);
-		} else
-			*word = strdup(_previous_word);
-		*pos = words - 1;
-		free(_line);
-		return 0;
-	}
-
-	free(_line);
-	return -1;
-}
-#endif /* BROKEN_READLINE */
-
 static char *complete_context_remove_extension_deprecated(const char *line, const char *word, int pos,
 	int state)
 {
 	char *ret = NULL;
 	int which = 0;
 
-#ifdef BROKEN_READLINE
-	char *word2;
-	/*
-	 * Fix arguments, *word is a new allocated structure, REMEMBER to
-	 * free *word when you want to return from this function ...
-	 */
-	if (fix_complete_args(line, &word2, &pos)) {
-		ast_log(LOG_ERROR, "Out of free memory\n");
-		return NULL;
-	}
-	word = word2;
-#endif
-
-	if (pos == 2) { /* 'remove extension _X_' (exten@context ... */
+	if (pos == 2) { /* 'remove extension _X_' (exten/cid@context ... */
 		struct ast_context *c = NULL;
-		char *context = NULL, *exten = NULL;
+		char *context = NULL, *exten = NULL, *cid = NULL;
 		int le = 0;	/* length of extension */
 		int lc = 0;	/* length of context */
+		int lcid = 0; /* length of cid */
 
-		lc = split_ec(word, &exten, &context);
-#ifdef BROKEN_READLINE
-		free(word2);
-#endif
+		lc = split_ec(word, &exten, &context, &cid);
 		if (lc)	/* error */
 			return NULL;
 		le = strlen(exten);
 		lc = strlen(context);
+		lcid = cid ? strlen(cid) : -1;
 
 		if (ast_rdlock_contexts()) {
 			ast_log(LOG_ERROR, "Failed to lock context list\n");
@@ -699,11 +652,28 @@ static char *complete_context_remove_extension_deprecated(const char *line, cons
 			if (!partial_match(ast_get_context_name(c), context, lc))
 				continue;	/* context not matched */
 			while ( (e = ast_walk_context_extensions(c, e)) ) { /* try to complete extensions ... */
-				if ( partial_match(ast_get_extension_name(e), exten, le) && ++which > state) { /* n-th match */
-					/* If there is an extension then return exten@context. XXX otherwise ? */
-					if (exten)
-						asprintf(&ret, "%s@%s", ast_get_extension_name(e), ast_get_context_name(c));
-					break;
+				if ( !strchr(word, '/') ||
+						(!strchr(word, '@') && partial_match(ast_get_extension_cidmatch(e), cid, lcid)) ||
+						(strchr(word, '@') && !strcmp(ast_get_extension_cidmatch(e), cid))) {
+					if ( ((strchr(word, '/') || strchr(word, '@')) && !strcmp(ast_get_extension_name(e), exten)) ||
+						 (!strchr(word, '/') && !strchr(word, '@') && partial_match(ast_get_extension_name(e), exten, le))) { /* n-th match */
+						if (++which > state) {
+							/* If there is an extension then return exten@context. */
+							if (ast_get_extension_matchcid(e) && (!strchr(word, '@') || strchr(word, '/'))) {
+								if (asprintf(&ret, "%s/%s@%s", ast_get_extension_name(e), ast_get_extension_cidmatch(e), ast_get_context_name(c)) < 0) {
+									ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+									ret = NULL;
+								}
+								break;
+							} else if (!ast_get_extension_matchcid(e) && !strchr(word, '/')) {
+								if (asprintf(&ret, "%s@%s", ast_get_extension_name(e), ast_get_context_name(c)) < 0) {
+									ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+									ret = NULL;
+								}
+								break;
+							}
+						}
+					}
 				}
 			}
 			if (e)	/* got a match */
@@ -715,11 +685,11 @@ static char *complete_context_remove_extension_deprecated(const char *line, cons
 		if (exten)
 			free(exten);
 	} else if (pos == 3) { /* 'remove extension EXT _X_' (priority) */
-		char *exten = NULL, *context, *p;
+		char *exten = NULL, *context, *cid, *p;
 		struct ast_context *c;
-		int le, lc, len;
+		int le, lc, lcid, len;
 		const char *s = skip_words(line, 2); /* skip 'remove' 'extension' */
-		int i = split_ec(s, &exten, &context);	/* parse ext@context */
+		int i = split_ec(s, &exten, &context, &cid);	/* parse ext@context */
 
 		if (i)	/* error */
 			goto error3;
@@ -729,6 +699,11 @@ static char *complete_context_remove_extension_deprecated(const char *line, cons
 			*p = '\0';
 		le = strlen(exten);
 		lc = strlen(context);
+		if (cid == NULL) {
+			lcid = 0;
+		} else {
+			lcid = strlen(cid);
+		}
 		len = strlen(word);
 		if (le == 0 || lc == 0)
 			goto error3;
@@ -751,6 +726,9 @@ static char *complete_context_remove_extension_deprecated(const char *line, cons
 				struct ast_exten *priority;
 				char buffer[10];
 
+				if (cid && strcmp(ast_get_extension_cidmatch(e), cid) != 0) {
+					continue;
+				}
 				if (strcmp(ast_get_extension_name(e), exten) != 0)
 					continue;
 				/* XXX lock e ? */
@@ -768,9 +746,6 @@ static char *complete_context_remove_extension_deprecated(const char *line, cons
 	error3:
 		if (exten)
 			free(exten);
-#ifdef BROKEN_READLINE
-		free(word2);
-#endif
 	}
 	return ret; 
 }
@@ -781,33 +756,20 @@ static char *complete_context_remove_extension(const char *line, const char *wor
 	char *ret = NULL;
 	int which = 0;
 
-#ifdef BROKEN_READLINE
-	char *word2;
-	/*
-	 * Fix arguments, *word is a new allocated structure, REMEMBER to
-	 * free *word when you want to return from this function ...
-	 */
-	if (fix_complete_args(line, &word2, &pos)) {
-		ast_log(LOG_ERROR, "Out of free memory\n");
-		return NULL;
-	}
-	word = word2;
-#endif
-
 	if (pos == 3) { /* 'dialplan remove extension _X_' (exten@context ... */
 		struct ast_context *c = NULL;
-		char *context = NULL, *exten = NULL;
+		char *context = NULL, *exten = NULL, *cid = NULL;
 		int le = 0;	/* length of extension */
 		int lc = 0;	/* length of context */
+		int lcid = 0; /* length of cid */
 
-		lc = split_ec(word, &exten, &context);
-#ifdef BROKEN_READLINE
-		free(word2);
-#endif
-		if (lc)	/* error */
+		lc = split_ec(word, &exten, &context, &cid);
+		if (lc)	{ /* error */
 			return NULL;
+		}
 		le = strlen(exten);
 		lc = strlen(context);
+		lcid = cid ? strlen(cid) : -1;
 
 		if (ast_rdlock_contexts()) {
 			ast_log(LOG_ERROR, "Failed to lock context list\n");
@@ -821,27 +783,43 @@ static char *complete_context_remove_extension(const char *line, const char *wor
 			if (!partial_match(ast_get_context_name(c), context, lc))
 				continue;	/* context not matched */
 			while ( (e = ast_walk_context_extensions(c, e)) ) { /* try to complete extensions ... */
-				if ( partial_match(ast_get_extension_name(e), exten, le) && ++which > state) { /* n-th match */
-					/* If there is an extension then return exten@context. XXX otherwise ? */
-					if (exten)
-						asprintf(&ret, "%s@%s", ast_get_extension_name(e), ast_get_context_name(c));
-					break;
+				if ( !strchr(word, '/') ||
+						(!strchr(word, '@') && partial_match(ast_get_extension_cidmatch(e), cid, lcid)) ||
+						(strchr(word, '@') && !strcmp(ast_get_extension_cidmatch(e), cid))) {
+					if ( ((strchr(word, '/') || strchr(word, '@')) && !strcmp(ast_get_extension_name(e), exten)) ||
+						 (!strchr(word, '/') && !strchr(word, '@') && partial_match(ast_get_extension_name(e), exten, le))) { /* n-th match */
+						if (++which > state) {
+							/* If there is an extension then return exten@context. */
+							if (ast_get_extension_matchcid(e) && (!strchr(word, '@') || strchr(word, '/'))) {
+								if (asprintf(&ret, "%s/%s@%s", ast_get_extension_name(e), ast_get_extension_cidmatch(e), ast_get_context_name(c)) < 0) {
+									ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+									ret = NULL;
+								}
+								break;
+							} else if (!ast_get_extension_matchcid(e) && !strchr(word, '/')) {
+								if (asprintf(&ret, "%s@%s", ast_get_extension_name(e), ast_get_context_name(c)) < 0) {
+									ast_log(LOG_WARNING, "asprintf() failed: %s\n", strerror(errno));
+									ret = NULL;
+								}
+								break;
+							}
+						}
+					}
 				}
 			}
 			if (e)	/* got a match */
 				break;
 		}
-
 		ast_unlock_contexts();
 	error2:
 		if (exten)
 			free(exten);
 	} else if (pos == 4) { /* 'dialplan remove extension EXT _X_' (priority) */
-		char *exten = NULL, *context, *p;
+		char *exten = NULL, *context, *cid, *p;
 		struct ast_context *c;
-		int le, lc, len;
+		int le, lc, lcid, len;
 		const char *s = skip_words(line, 3); /* skip 'dialplan' 'remove' 'extension' */
-		int i = split_ec(s, &exten, &context);	/* parse ext@context */
+		int i = split_ec(s, &exten, &context, &cid);	/* parse ext@context */
 
 		if (i)	/* error */
 			goto error3;
@@ -851,6 +829,7 @@ static char *complete_context_remove_extension(const char *line, const char *wor
 			*p = '\0';
 		le = strlen(exten);
 		lc = strlen(context);
+		lcid = cid ? strlen(cid) : -1;
 		len = strlen(word);
 		if (le == 0 || lc == 0)
 			goto error3;
@@ -873,6 +852,9 @@ static char *complete_context_remove_extension(const char *line, const char *wor
 				struct ast_exten *priority;
 				char buffer[10];
 
+				if (cid && strcmp(ast_get_extension_cidmatch(e), cid) != 0) {
+					continue;
+				}
 				if (strcmp(ast_get_extension_name(e), exten) != 0)
 					continue;
 				/* XXX lock e ? */
@@ -890,9 +872,6 @@ static char *complete_context_remove_extension(const char *line, const char *wor
 	error3:
 		if (exten)
 			free(exten);
-#ifdef BROKEN_READLINE
-		free(word2);
-#endif
 	}
 	return ret; 
 }
@@ -1444,7 +1423,7 @@ static int handle_context_add_extension_deprecated(int fd, int argc, char *argv[
 		if (!strcmp(prior, "hint")) {
 			iprior = PRIORITY_HINT;
 		} else {
-			if (sscanf(prior, "%d", &iprior) != 1) {
+			if (sscanf(prior, "%30d", &iprior) != 1) {
 				ast_cli(fd, "'%s' is not a valid priority\n", prior);
 				prior = NULL;
 			}
@@ -1472,7 +1451,7 @@ static int handle_context_add_extension_deprecated(int fd, int argc, char *argv[
 	if (!app_data)
 		app_data="";
 	if (ast_add_extension(argv[4], argc == 6 ? 1 : 0, exten, iprior, NULL, cidmatch, app,
-		(void *)strdup(app_data), ast_free, registrar)) {
+		(void *)strdup(app_data), ast_free_ptr, registrar)) {
 		switch (errno) {
 		case ENOMEM:
 			ast_cli(fd, "Out of free memory\n");
@@ -1537,7 +1516,7 @@ static int handle_context_add_extension(int fd, int argc, char *argv[])
 		if (!strcmp(prior, "hint")) {
 			iprior = PRIORITY_HINT;
 		} else {
-			if (sscanf(prior, "%d", &iprior) != 1) {
+			if (sscanf(prior, "%30d", &iprior) != 1) {
 				ast_cli(fd, "'%s' is not a valid priority\n", prior);
 				prior = NULL;
 			}
@@ -1565,7 +1544,7 @@ static int handle_context_add_extension(int fd, int argc, char *argv[])
 	if (!app_data)
 		app_data="";
 	if (ast_add_extension(argv[5], argc == 7 ? 1 : 0, exten, iprior, NULL, cidmatch, app,
-		(void *)strdup(app_data), ast_free, registrar)) {
+		(void *)strdup(app_data), ast_free_ptr, registrar)) {
 		switch (errno) {
 		case ENOMEM:
 			ast_cli(fd, "Out of free memory\n");
@@ -2081,6 +2060,7 @@ static int handle_reload_extensions(int fd, int argc, char *argv[])
 	if (clearglobalvars_config)
 		pbx_builtin_clear_globals();
 	pbx_load_module();
+	ast_cli(fd, "Dialplan reloaded.\n");
 	return RESULT_SUCCESS;
 }
 
@@ -2180,7 +2160,11 @@ static int pbx_load_config(const char *config_file)
 	struct ast_config *cfg;
 	char *end;
 	char *label;
+#ifdef LOW_MEMORY
 	char realvalue[256];
+#else
+	char realvalue[8192];
+#endif
 	int lastpri = -2;
 	struct ast_context *con;
 	struct ast_variable *v;
@@ -2264,7 +2248,7 @@ static int pbx_load_config(const char *config_file)
 							ipri = lastpri;
 						else
 							ast_log(LOG_WARNING, "Can't use 'same' priority on the first entry!\n");
-					} else if (sscanf(pri, "%d", &ipri) != 1 &&
+					} else if (sscanf(pri, "%30d", &ipri) != 1 &&
 					    (ipri = ast_findlabel_extension2(NULL, con, realext, pri, cidmatch)) < 1) {
 						ast_log(LOG_WARNING, "Invalid priority/label '%s' at line %d\n", pri, v->lineno);
 						ipri = 0;
@@ -2282,16 +2266,30 @@ static int pbx_load_config(const char *config_file)
 						/* Neither found */
 						data = "";
 					} else {
+						char *orig_appl = strdup(appl);
+
+						if (!orig_appl)
+							return -1;
+
 						/* Final remaining case is parenthesis found first */
 						appl = strsep(&stringp, "(");
-						data = stringp;
-						end = strrchr(data, ')');
-						if ((end = strrchr(data, ')'))) {
-							*end = '\0';
+
+						/* check if there are variables or expressions without an application, like: exten => 100,hint,DAHDI/g0/${GLOBAL(var)} */
+						if (strstr(appl, "${") || strstr(appl, "$[")){
+							/* set appl to original one */
+							strcpy(appl, orig_appl);
+							data = "";
 						} else {
-							ast_log(LOG_WARNING, "No closing parenthesis found? '%s(%s'\n", appl, data);
+							data = stringp;
+							end = strrchr(data, ')');
+							if ((end = strrchr(data, ')'))) {
+								*end = '\0';
+							} else {
+								ast_log(LOG_WARNING, "No closing parenthesis found? '%s(%s'\n", appl, data);
+							}
+							ast_process_quotes_and_slashes(data, ',', '|');
 						}
-						ast_process_quotes_and_slashes(data, ',', '|');
+						ast_free(orig_appl);
 					}
 
 					if (!data)
@@ -2303,7 +2301,7 @@ static int pbx_load_config(const char *config_file)
 						lastpri = ipri;
 						if (!ast_opt_dont_warn && !strcmp(realext, "_."))
 							ast_log(LOG_WARNING, "The use of '_.' for an extension is strongly discouraged and can have unexpected behavior.  Please use '_X.' instead at line %d\n", v->lineno);
-						if (ast_add_extension2(con, 0, realext, ipri, label, cidmatch, appl, strdup(data), ast_free, registrar)) {
+						if (ast_add_extension2(con, 0, realext, ipri, label, cidmatch, appl, strdup(data), ast_free_ptr, registrar)) {
 							ast_log(LOG_WARNING, "Unable to register extension at line %d\n", v->lineno);
 						}
 					}
@@ -2357,7 +2355,7 @@ static void pbx_load_users(void)
 {
 	struct ast_config *cfg;
 	char *cat, *chan;
-	const char *zapchan;
+	const char *dahdichan;
 	const char *hasexten;
 	char tmp[256];
 	char iface[256];
@@ -2393,17 +2391,27 @@ static void pbx_load_users(void)
 		if (hasexten && !ast_true(hasexten))
 			continue;
 		hasvoicemail = ast_true(ast_config_option(cfg, cat, "hasvoicemail"));
-		zapchan = ast_variable_retrieve(cfg, cat, "zapchan");
-		if (!zapchan)
-			zapchan = ast_variable_retrieve(cfg, "general", "zapchan");
-		if (!ast_strlen_zero(zapchan)) {
-			ast_copy_string(zapcopy, zapchan, sizeof(zapcopy));
+		dahdichan = ast_variable_retrieve(cfg, cat, "dahdichan");
+		if (!dahdichan)
+			dahdichan = ast_variable_retrieve(cfg, "general", "dahdichan");
+		if (!dahdichan) {
+		/* no dahdichan, but look for zapchan too */
+			dahdichan = ast_variable_retrieve(cfg, cat, "zapchan");
+			if (!dahdichan) {
+				dahdichan = ast_variable_retrieve(cfg, "general", "zapchan");
+			}
+			if (!ast_strlen_zero(dahdichan)) {
+				ast_log(LOG_WARNING, "Use of zapchan in users.conf is deprecated. Please update configuration to use dahdichan instead.\n");
+			}
+		}
+		if (!ast_strlen_zero(dahdichan)) {
+			ast_copy_string(zapcopy, dahdichan, sizeof(zapcopy));
 			c = zapcopy;
 			chan = strsep(&c, ",");
 			while (chan) {
-				if (sscanf(chan, "%d-%d", &start, &finish) == 2) {
+				if (sscanf(chan, "%30d-%30d", &start, &finish) == 2) {
 					/* Range */
-				} else if (sscanf(chan, "%d", &start)) {
+				} else if (sscanf(chan, "%30d", &start)) {
 					/* Just one */
 					finish = start;
 				} else {
@@ -2415,7 +2423,7 @@ static void pbx_load_users(void)
 					start = x;
 				}
 				for (x = start; x <= finish; x++) {
-					snprintf(tmp, sizeof(tmp), "Zap/%d", x);
+					snprintf(tmp, sizeof(tmp), "%s/%d", dahdi_chan_name, x);
 					append_interface(iface, sizeof(iface), tmp);
 				}
 				chan = strsep(&c, ",");
@@ -2437,9 +2445,9 @@ static void pbx_load_users(void)
 			/* If voicemail, use "stdexten" else use plain old dial */
 			if (hasvoicemail) {
 				snprintf(tmp, sizeof(tmp), "stdexten|%s|${HINT}", cat);
-				ast_add_extension2(con, 0, cat, 1, NULL, NULL, "Macro", strdup(tmp), ast_free, registrar);
+				ast_add_extension2(con, 0, cat, 1, NULL, NULL, "Macro", strdup(tmp), ast_free_ptr, registrar);
 			} else {
-				ast_add_extension2(con, 0, cat, 1, NULL, NULL, "Dial", strdup("${HINT}"), ast_free, registrar);
+				ast_add_extension2(con, 0, cat, 1, NULL, NULL, "Dial", strdup("${HINT}"), ast_free_ptr, registrar);
 			}
 		}
 	}

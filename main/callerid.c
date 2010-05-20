@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 69805 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 206867 $")
 
 #include <time.h>
 #include <string.h>
@@ -305,7 +305,7 @@ int callerid_feed_jp(struct callerid_state *cid, unsigned char *ubuf, int len, i
 		res = fsk_serie(&cid->fskd, buf, &mylen, &b);
 
 		if (mylen < 0) {
-			ast_log(LOG_ERROR, "fsk_serie made mylen < 0 (%d)\n", mylen);
+			ast_log(LOG_ERROR, "No start bit found in fsk data.\n");
 			free(obuf);
 			return -1;
 		}
@@ -561,7 +561,7 @@ int callerid_feed(struct callerid_state *cid, unsigned char *ubuf, int len, int 
 		olen = mylen;
 		res = fsk_serie(&cid->fskd, buf, &mylen, &b);
 		if (mylen < 0) {
-			ast_log(LOG_ERROR, "fsk_serie made mylen < 0 (%d)\n", mylen);
+			ast_log(LOG_ERROR, "No start bit found in fsk data.\n");
 			free(obuf);
 			return -1;
 		}
@@ -781,7 +781,7 @@ static int callerid_genmsg(char *msg, int size, const char *number, const char *
 	
 }
 
-int vmwi_generate(unsigned char *buf, int active, int mdmf, int codec)
+int ast_callerid_vmwi_generate(unsigned char *buf, int active, int mdmf, int codec)
 {
 	unsigned char msg[256];
 	int len=0;
@@ -957,27 +957,35 @@ int ast_is_shrinkable_phonenumber(const char *exten)
 	return ast_is_valid_string(exten, "0123456789*#+()-.");
 }
 
-/*! \brief parse string for caller id information 
-	\return always returns 0, as the code always returns something.
-  XXX note that 'name' is not parsed consistently e.g. we have
-
-	input			location	name
-	" foo bar " <123>	123		' foo bar ' (with spaces around)
-	" foo bar "		NULL		'foo bar' (without spaces around)
-	" foo bar  <123>"	123		'" foo bar'
-  The parsing of leading and trailing space/quotes should be more consistent.
-*/
+/*!
+ * \brief Destructively parse instr for caller id information 
+ * \return always returns 0, as the code always returns something.
+ * \note XXX 'name' is not parsed consistently e.g. we have
+ * input                   location        name
+ * " foo bar " <123>       123             ' foo bar ' (with spaces around)
+ * " foo bar "             NULL            'foo bar' (without spaces around)
+ * The parsing of leading and trailing space/quotes should be more consistent.
+ */
 int ast_callerid_parse(char *instr, char **name, char **location)
 {
 	char *ns, *ne, *ls, *le;
 
 	/* Try "name" <location> format or name <location> format */
-	if ((ls = strchr(instr, '<')) && (le = strchr(ls, '>'))) {
+	if ((ls = strrchr(instr, '<')) && (le = strrchr(ls, '>'))) {
 		*ls = *le = '\0';	/* location found, trim off the brackets */
 		*location = ls + 1;	/* and this is the result */
 		if ((ns = strchr(instr, '"')) && (ne = strchr(ns + 1, '"'))) {
 			*ns = *ne = '\0';	/* trim off the quotes */
 			*name = ns + 1;		/* and this is the name */
+		} else if (ns) {
+			/* An opening quote was found but no closing quote was. The closing
+			 * quote may actually be after the end of the bracketed number
+			 */
+			if (strchr(le + 1, '\"')) {
+				*ns = '\0';
+				*name = ns + 1;
+				ast_trim_blanks(*name);
+			}
 		} else { /* no quotes, trim off leading and trailing spaces */
 			*name = ast_skip_blanks(instr);
 			ast_trim_blanks(*name);
@@ -1083,6 +1091,10 @@ static struct {
 int ast_parse_caller_presentation(const char *data)
 {
 	int i;
+
+	if (!data) {
+		return -1;
+	}
 
 	for (i = 0; i < ((sizeof(pres_types) / sizeof(pres_types[0]))); i++) {
 		if (!strcasecmp(pres_types[i].name, data))
