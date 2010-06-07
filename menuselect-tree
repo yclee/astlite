@@ -73,6 +73,7 @@
 	<depend>zaptel</depend>
 </member>
 <member name="app_milliwatt" displayname="Digital Milliwatt (mu-law) Test Application" remove_on_change="apps/app_milliwatt.o apps/app_milliwatt.so">
+	<depend>res_indications</depend>
 </member>
 <member name="app_mixmonitor" displayname="Mixed Audio Monitoring Application" remove_on_change="apps/app_mixmonitor.o apps/app_mixmonitor.so">
 </member>
@@ -252,7 +253,7 @@
 	<depend>res_features</depend>
 	<use>pri</use>
 </member>
-<member name="chan_vpb" displayname="" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
+<member name="chan_vpb" displayname="Voicetronix API driver" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
 	<depend>vpbapi</depend>
 </member>
 </category>
@@ -275,6 +276,7 @@
 </member>
 <member name="codec_speex" displayname="Speex Coder/Decoder" remove_on_change="codecs/codec_speex.o codecs/codec_speex.so">
 	<depend>speex</depend>
+	<depend>speex_preprocess</depend>
 	<use>speexdsp</use>
 </member>
 <member name="codec_ulaw" displayname="mu-Law Coder/Decoder" remove_on_change="codecs/codec_ulaw.o codecs/codec_ulaw.so">

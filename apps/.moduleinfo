@@ -70,6 +70,7 @@
 	<depend>zaptel</depend>
 </member>
 <member name="app_milliwatt" displayname="Digital Milliwatt (mu-law) Test Application" remove_on_change="apps/app_milliwatt.o apps/app_milliwatt.so">
+	<depend>res_indications</depend>
 </member>
 <member name="app_mixmonitor" displayname="Mixed Audio Monitoring Application" remove_on_change="apps/app_mixmonitor.o apps/app_mixmonitor.so">
 </member>

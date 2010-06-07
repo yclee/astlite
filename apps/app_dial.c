@@ -32,7 +32,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 107016 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 119530 $")
 
 #include <stdlib.h>
 #include <errno.h>
@@ -210,7 +210,7 @@ static char *rdescrip =
 "  RetryDial(announce|sleep|retries|dialargs): This application will attempt to\n"
 "place a call using the normal Dial application. If no channel can be reached,\n"
 "the 'announce' file will be played. Then, it will wait 'sleep' number of\n"
-"seconds before retying the call. After 'retires' number of attempts, the\n"
+"seconds before retrying the call. After 'retries' number of attempts, the\n"
 "calling channel will continue at the next priority in the dialplan. If the\n"
 "'retries' setting is set to 0, this application will retry endlessly.\n"
 "  While waiting to retry a call, a 1 digit extension may be dialed. If that\n"
@@ -1320,8 +1320,14 @@ static int dial_exec_full(struct ast_channel *chan, void *data, struct ast_flags
 	time(&start_time);
 	peer = wait_for_answer(chan, outgoing, &to, peerflags, &sentringing, status, sizeof(status), numbusy, numnochan, numcongestion, ast_test_flag(&opts, OPT_PRIORITY_JUMP), &result);
 
-	ast_channel_datastore_remove(chan, datastore);
-	ast_channel_datastore_free(datastore);
+	/* The ast_channel_datastore_remove() function could fail here if the
+	 * datastore was moved to another channel during a masquerade. If this is
+	 * the case, don't free the datastore here because later, when the channel
+	 * to which the datastore was moved hangs up, it will attempt to free this
+	 * datastore again, causing a crash
+	 */
+	if (!ast_channel_datastore_remove(chan, datastore))
+		ast_channel_datastore_free(datastore);
 	if (!peer) {
 		if (result) {
 			res = result;

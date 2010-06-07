@@ -53,7 +53,7 @@
 	<depend>res_features</depend>
 	<use>pri</use>
 </member>
-<member name="chan_vpb" displayname="" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
+<member name="chan_vpb" displayname="Voicetronix API driver" remove_on_change="channels/chan_vpb.oo channels/chan_vpb.so">
 	<depend>vpbapi</depend>
 </member>
 </category>

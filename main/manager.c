@@ -34,7 +34,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 106552 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 120061 $")
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,9 +130,12 @@ static struct permalias {
 	{ 0, "none" },
 };
 
-static const char *command_blacklist[] = {
-	"module load",
-	"module unload",
+#define MAX_BLACKLIST_CMD_LEN 2
+static struct {
+	char *words[AST_MAX_CMD_LEN];
+} command_blacklist[] = {
+	{{ "module", "load", NULL }},
+	{{ "module", "unload", NULL }},
 };
 
 struct mansession {
@@ -151,7 +154,7 @@ struct mansession {
 	/*! Whether an HTTP session has someone waiting on events */
 	pthread_t waiting_thread;
 	/*! Unique manager identifer */
-	unsigned long managerid;
+	uint32_t managerid;
 	/*! Session timeout if HTTP */
 	time_t sessiontimeout;
 	/*! Output from manager interface */
@@ -175,6 +178,7 @@ struct mansession {
 	struct eventqent *eventq;
 	/* Timeout for ast_carefulwrite() */
 	int writetimeout;
+	int pending_event;         /*!< Pending events indicator in case when waiting_thread is NULL */
 	AST_LIST_ENTRY(mansession) list;
 };
 
@@ -1680,6 +1684,41 @@ static int action_redirect(struct mansession *s, const struct message *m)
 	return 0;
 }
 
+static int check_blacklist(const char *cmd)
+{
+	char *cmd_copy, *cur_cmd;
+	char *cmd_words[MAX_BLACKLIST_CMD_LEN] = { NULL, };
+	int i;
+
+	cmd_copy = ast_strdupa(cmd);
+	for (i = 0; i < MAX_BLACKLIST_CMD_LEN && (cur_cmd = strsep(&cmd_copy, " ")); i++) {
+		cur_cmd = ast_strip(cur_cmd);
+		if (ast_strlen_zero(cur_cmd)) {
+			i--;
+			continue;
+		}
+
+		cmd_words[i] = cur_cmd;
+	}
+
+	for (i = 0; i < ARRAY_LEN(command_blacklist); i++) {
+		int j, match = 1;
+
+		for (j = 0; command_blacklist[i].words[j]; j++) {
+			if (ast_strlen_zero(cmd_words[j]) || strcasecmp(cmd_words[j], command_blacklist[i].words[j])) {
+				match = 0;
+				break;
+			}
+		}
+
+		if (match) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 static char mandescr_command[] = 
 "Description: Run a CLI command.\n"
 "Variables: (Names marked with * are required)\n"
@@ -1693,14 +1732,17 @@ static int action_command(struct mansession *s, const struct message *m)
 	const char *id = astman_get_header(m, "ActionID");
 	char *buf, *final_buf;
 	char template[] = "/tmp/ast-ami-XXXXXX";	/* template for temporary file */
-	int fd = mkstemp(template), i = 0;
+	int fd = mkstemp(template);
 	off_t l;
 
-	for (i = 0; i < sizeof(command_blacklist) / sizeof(command_blacklist[0]); i++) {
-		if (!strncmp(cmd, command_blacklist[i], strlen(command_blacklist[i]))) {
-			astman_send_error(s, m, "Command blacklisted");
-			return 0;
-		}
+	if (ast_strlen_zero(cmd)) {
+		astman_send_error(s, m, "No command provided");
+		return 0;
+	}
+
+	if (check_blacklist(cmd)) {
+		astman_send_error(s, m, "Command blacklisted");
+		return 0;
 	}
 
 	astman_append(s, "Response: Follows\r\nPrivilege: Command\r\n");
@@ -2202,6 +2244,11 @@ static int get_input(struct mansession *s, char *output)
 	fds[0].events = POLLIN;
 	do {
 		ast_mutex_lock(&s->__lock);
+		if (s->pending_event) {
+			s->pending_event = 0;
+			ast_mutex_unlock(&s->__lock);
+			return 0;
+		}
 		s->waiting_thread = pthread_self();
 		ast_mutex_unlock(&s->__lock);
 
@@ -2211,7 +2258,7 @@ static int get_input(struct mansession *s, char *output)
 		s->waiting_thread = AST_PTHREADT_NULL;
 		ast_mutex_unlock(&s->__lock);
 		if (res < 0) {
-			if (errno == EINTR) {
+			if (errno == EINTR || errno == EAGAIN) {
 				return 0;
 			}
 			ast_log(LOG_WARNING, "Select returned error: %s\n", strerror(errno));
@@ -2463,6 +2510,13 @@ int manager_event(int category, const char *event, const char *fmt, ...)
 		ast_mutex_lock(&s->__lock);
 		if (s->waiting_thread != AST_PTHREADT_NULL)
 			pthread_kill(s->waiting_thread, SIGURG);
+		else
+			/* We have an event to process, but the mansession is
+			 * not waiting for it. We still need to indicate that there
+			 * is an event waiting so that get_input processes the pending
+			 * event instead of polling.
+			 */
+			s->pending_event = 1;
 		ast_mutex_unlock(&s->__lock);
 	}
 	AST_LIST_UNLOCK(&sessions);
@@ -2565,7 +2619,7 @@ int ast_manager_register2(const char *action, int auth, int (*func)(struct manse
 /*! @}
  END Doxygen group */
 
-static struct mansession *find_session(unsigned long ident)
+static struct mansession *find_session(uint32_t ident)
 {
 	struct mansession *s;
 
@@ -2583,7 +2637,7 @@ static struct mansession *find_session(unsigned long ident)
 	return s;
 }
 
-int astman_verify_session_readpermissions(unsigned long ident, int perm)
+int astman_verify_session_readpermissions(uint32_t ident, int perm)
 {
 	int result = 0;
 	struct mansession *s;
@@ -2602,7 +2656,7 @@ int astman_verify_session_readpermissions(unsigned long ident, int perm)
 	return result;
 }
 
-int astman_verify_session_writepermissions(unsigned long ident, int perm)
+int astman_verify_session_writepermissions(uint32_t ident, int perm)
 {
 	int result = 0;
 	struct mansession *s;
@@ -2631,7 +2685,7 @@ static char *contenttype[] = { "plain", "html", "xml" };
 static char *generic_http_callback(int format, struct sockaddr_in *requestor, const char *uri, struct ast_variable *params, int *status, char **title, int *contentlength)
 {
 	struct mansession *s = NULL;
-	unsigned long ident = 0;
+	uint32_t ident = 0;
 	char workspace[512];
 	char cookie[128];
 	size_t len = sizeof(workspace);
@@ -2642,7 +2696,7 @@ static char *generic_http_callback(int format, struct sockaddr_in *requestor, co
 
 	for (v = params; v; v = v->next) {
 		if (!strcasecmp(v->name, "mansession_id")) {
-			sscanf(v->value, "%lx", &ident);
+			sscanf(v->value, "%x", &ident);
 			break;
 		}
 	}
@@ -2715,7 +2769,7 @@ static char *generic_http_callback(int format, struct sockaddr_in *requestor, co
 			s->needdestroy = 1;
 		}
 		ast_build_string(&c, &len, "Content-type: text/%s\r\n", contenttype[format]);
-		sprintf(tmp, "%08lx", s->managerid);
+		sprintf(tmp, "%08x", s->managerid);
 		ast_build_string(&c, &len, "%s\r\n", ast_http_setcookie("mansession_id", tmp, httptimeout, cookie, sizeof(cookie)));
 		if (format == FORMAT_HTML)
 			ast_build_string(&c, &len, "<title>Asterisk&trade; Manager Interface</title>");
@@ -2823,7 +2877,7 @@ static int webregged = 0;
 
 int init_manager(void)
 {
-	struct ast_config *cfg = NULL;
+	struct ast_config *cfg = NULL, *ucfg = NULL;
 	const char *val;
 	char *cat = NULL;
 	int oldportno = portno;
@@ -2920,6 +2974,71 @@ int init_manager(void)
 	}
 
 	AST_LIST_LOCK(&users);
+
+	if ((ucfg = ast_config_load("users.conf"))) {
+		while ((cat = ast_category_browse(ucfg, cat))) {
+			int hasmanager = 0;
+			struct ast_variable *var = NULL;
+
+			if (!strcasecmp(cat, "general")) {
+				continue;
+			}
+
+			if (!(hasmanager = ast_true(ast_variable_retrieve(ucfg, cat, "hasmanager")))) {
+				continue;
+			}
+
+			/* Look for an existing entry, if none found - create one and add it to the list */
+			if (!(user = ast_get_manager_by_name_locked(cat))) {
+				if (!(user = ast_calloc(1, sizeof(*user)))) {
+					break;
+				}
+				/* Copy name over */
+				ast_copy_string(user->username, cat, sizeof(user->username));
+				/* Insert into list */
+				AST_LIST_INSERT_TAIL(&users, user, list);
+			}
+
+			/* Make sure we keep this user and don't destroy it during cleanup */
+			user->keep = 1;
+
+			for (var = ast_variable_browse(ucfg, cat); var; var = var->next) {
+				if (!strcasecmp(var->name, "secret")) {
+					if (user->secret) {
+						free(user->secret);
+					}
+					user->secret = ast_strdup(var->value);
+				} else if (!strcasecmp(var->name, "deny") ) {
+					if (user->deny) {
+						free(user->deny);
+					}
+					user->deny = ast_strdup(var->value);
+				} else if (!strcasecmp(var->name, "permit") ) {
+					if (user->permit) {
+						free(user->permit);
+					}
+					user->permit = ast_strdup(var->value);
+				} else if (!strcasecmp(var->name, "read") ) {
+					if (user->read) {
+						free(user->read);
+					}
+					user->read = ast_strdup(var->value);
+				} else if (!strcasecmp(var->name, "write") ) {
+					if (user->write) {
+						free(user->write);
+					}
+					user->write = ast_strdup(var->value);
+				} else if (!strcasecmp(var->name, "displayconnects") ) {
+					user->displayconnects = ast_true(var->value);
+				} else if (!strcasecmp(var->name, "hasmanager")) {
+					/* already handled */
+				} else {
+					ast_log(LOG_DEBUG, "%s is an unknown option (to the manager module).\n", var->name);
+				}
+			}
+		}
+		ast_config_destroy(ucfg);
+	}
 
 	while ((cat = ast_category_browse(cfg, cat))) {
 		struct ast_variable *var = NULL;
