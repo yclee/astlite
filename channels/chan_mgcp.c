@@ -33,7 +33,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 106235 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 118953 $")
 
 #include <stdio.h>
 #include <string.h>
@@ -574,9 +574,7 @@ static void mgcp_queue_frame(struct mgcp_subchannel *sub, struct ast_frame *f)
 				ast_mutex_unlock(&sub->owner->lock);
 				break;
 			} else {
-				ast_mutex_unlock(&sub->lock);
-				usleep(1);
-				ast_mutex_lock(&sub->lock);
+				DEADLOCK_AVOIDANCE(&sub->lock);
 			}
 		} else
 			break;
@@ -592,9 +590,7 @@ static void mgcp_queue_hangup(struct mgcp_subchannel *sub)
 				ast_mutex_unlock(&sub->owner->lock);
 				break;
 			} else {
-				ast_mutex_unlock(&sub->lock);
-				usleep(1);
-				ast_mutex_lock(&sub->lock);
+				DEADLOCK_AVOIDANCE(&sub->lock);
 			}
 		} else
 			break;

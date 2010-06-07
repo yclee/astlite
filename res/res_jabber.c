@@ -33,7 +33,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 105326 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 120675 $")
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -1565,7 +1565,7 @@ static void *aji_recv_loop(void *data)
 		else if (res == IKS_NET_TLSFAIL)
 			ast_log(LOG_WARNING, "JABBER:  Failure in TLS.\n");
 		else if (client->timeout == 0 && client->state == AJI_CONNECTED) {
-			res = iks_send_raw(client->p, " ");
+			res = client->keepalive ? iks_send_raw(client->p, " ") : IKS_OK;
 			if(res == IKS_OK)
 				client->timeout = 50;
 			else
@@ -2359,17 +2359,30 @@ static int aji_load_config(void)
 }
 
 /*!
- * \brief grab a aji_client structure by label name.
- * \param void. 
- * \return 1.
+  * \brief grab a aji_client structure by label name or JID 
+  * (without the resource string)
+  * \param name label or JID 
+  * \return aji_client.
  */
 struct aji_client *ast_aji_get_client(const char *name)
 {
 	struct aji_client *client = NULL;
+	char *aux = NULL;
 
 	client = ASTOBJ_CONTAINER_FIND(&clients, name);
-	if (!client && !strchr(name, '@'))
-		client = ASTOBJ_CONTAINER_FIND_FULL(&clients, name, user,,, strcasecmp);
+ 	if (!client && strchr(name, '@')) {
+ 		ASTOBJ_CONTAINER_TRAVERSE(&clients, 1, {
+ 			aux = ast_strdupa(iterator->user);
+ 			if (strchr(aux, '/')) {
+ 				/* strip resource for comparison */
+ 				aux = strsep(&aux, "/");
+ 			}
+ 			if (!strncasecmp(aux, name, strlen(aux))) {
+ 				client = iterator;
+ 			}				
+ 		});
+ 	}
+ 
 	return client;
 }
 

@@ -25,7 +25,7 @@
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 83432 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 116463 $")
 
 #ifdef DEBUG_SCHEDULER
 #define DEBUG(a) do { \
@@ -282,9 +282,7 @@ int ast_sched_del(struct sched_context *con, int id)
 	if (!s) {
 		if (option_debug)
 			ast_log(LOG_DEBUG, "Attempted to delete nonexistent schedule entry %d!\n", id);
-#ifdef DO_CRASH
-		CRASH;
-#endif
+		ast_assert(0);
 		return -1;
 	}
 	

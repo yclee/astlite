@@ -29,12 +29,13 @@
 
 /*** MODULEINFO
 	<depend>speex</depend>
+	<depend>speex_preprocess</depend>
 	<use>speexdsp</use>
  ***/
 
 #include "asterisk.h"
 
-ASTERISK_FILE_VERSION(__FILE__, "$Revision: 98951 $")
+ASTERISK_FILE_VERSION(__FILE__, "$Revision: 115327 $")
 
 #include <fcntl.h>
 #include <stdlib.h>
